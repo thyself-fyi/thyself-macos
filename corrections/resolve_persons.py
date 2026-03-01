@@ -131,6 +131,16 @@ def pass2_alias_match(conn: sqlite3.Connection, already_resolved: dict[str, int]
     return resolved
 
 
+def _build_alias_owner_index(conn: sqlite3.Connection) -> dict[str, int]:
+    """Build {alias_lower: person_identity_id} for all existing aliases and canonical names."""
+    owners: dict[str, int] = {}
+    for row in conn.execute("SELECT id, canonical_name FROM person_identities"):
+        owners[row["canonical_name"].lower()] = row["id"]
+    for row in conn.execute("SELECT person_identity_id, alias FROM person_aliases"):
+        owners[row["alias"].lower()] = row["person_identity_id"]
+    return owners
+
+
 def pass3_dedup_and_create(
     conn: sqlite3.Connection,
     all_resolved: dict[str, int],
@@ -145,6 +155,8 @@ def pass3_dedup_and_create(
     existing_aliases = set()
     for row in conn.execute("SELECT alias, context FROM person_aliases"):
         existing_aliases.add((row["alias"], row["context"]))
+
+    alias_owners = _build_alias_owner_index(conn)
 
     by_contact: dict[int, list[str]] = defaultdict(list)
     for name, contact_id in all_resolved.items():
@@ -219,12 +231,17 @@ def pass3_dedup_and_create(
 
             for alias in all_aliases_for_person:
                 if (alias, None) not in existing_aliases:
+                    owner = alias_owners.get(alias.lower())
+                    if owner is not None and owner != pid:
+                        print(f"    ALIAS COLLISION: '{alias}' already belongs to person #{owner}, skipping for #{pid}")
+                        continue
                     try:
                         conn.execute(
                             "INSERT INTO person_aliases (person_identity_id, alias, context) VALUES (?, ?, NULL)",
                             (pid, alias),
                         )
                         existing_aliases.add((alias, None))
+                        alias_owners[alias.lower()] = pid
                     except sqlite3.IntegrityError:
                         pass
 
@@ -266,6 +283,8 @@ def pass4_unresolved(
     existing_aliases_set = set()
     for row in conn.execute("SELECT alias, context FROM person_aliases"):
         existing_aliases_set.add((row["alias"], row["context"]))
+
+    alias_owners = _build_alias_owner_index(conn)
 
     unresolved = conn.execute("""
         SELECT canonical_name, COUNT(DISTINCT month_id) as months
@@ -318,12 +337,17 @@ def pass4_unresolved(
 
         for a in _get_extraction_aliases(conn, name):
             if not _is_email(a) and not _is_phone(a) and (a, None) not in existing_aliases_set:
+                owner = alias_owners.get(a.lower())
+                if owner is not None and owner != pid:
+                    print(f"    ALIAS COLLISION: '{a}' already belongs to person #{owner}, skipping for #{pid}")
+                    continue
                 try:
                     conn.execute(
                         "INSERT INTO person_aliases (person_identity_id, alias, context) VALUES (?, ?, NULL)",
                         (pid, a),
                     )
                     existing_aliases_set.add((a, None))
+                    alias_owners[a.lower()] = pid
                 except sqlite3.IntegrityError:
                     pass
 

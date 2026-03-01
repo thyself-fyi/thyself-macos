@@ -63,6 +63,37 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _get_unique_aliases(conn: sqlite3.Connection, pid: int, aliases: list[str]) -> list[str]:
+    """Filter out aliases that are shared with other person_identities.
+
+    A generic alias like "Andrew" can match relationship rows for multiple
+    different people, contaminating the summary. Only keep aliases that
+    uniquely identify this person.
+    """
+    if not aliases:
+        return aliases
+
+    placeholders = ",".join("?" for _ in aliases)
+    shared = conn.execute(f"""
+        SELECT alias FROM person_aliases
+        WHERE alias IN ({placeholders}) AND person_identity_id != ?
+    """, aliases + [pid]).fetchall()
+    shared_set = {r["alias"] for r in shared}
+
+    also_canonical = conn.execute(f"""
+        SELECT canonical_name FROM person_identities
+        WHERE canonical_name IN ({placeholders}) AND id != ?
+    """, aliases + [pid]).fetchall()
+    shared_set.update(r["canonical_name"] for r in also_canonical)
+
+    if shared_set:
+        unique = [a for a in aliases if a not in shared_set]
+        dropped = shared_set & set(aliases)
+        print(f"    Dropped ambiguous aliases for #{pid}: {dropped}")
+        return unique
+    return aliases
+
+
 def get_relationship_data(conn: sqlite3.Connection, pid: int) -> list[dict]:
     """Get chronological relationship observations for a person identity."""
     aliases = [r["alias"] for r in conn.execute(
@@ -72,7 +103,8 @@ def get_relationship_data(conn: sqlite3.Connection, pid: int) -> list[dict]:
         "SELECT canonical_name FROM person_identities WHERE id = ?", (pid,)
     ).fetchone()["canonical_name"]
 
-    all_names = list(set(aliases + [canonical]))
+    safe_aliases = _get_unique_aliases(conn, pid, aliases)
+    all_names = list(set(safe_aliases + [canonical]))
     placeholders = ",".join("?" for _ in all_names)
 
     rows = conn.execute(f"""

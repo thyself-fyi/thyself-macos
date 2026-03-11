@@ -11,6 +11,95 @@ import type {
 } from "../lib/types";
 import { buildSystemPrompt, buildOnboardingPrompt } from "../lib/systemPrompt";
 
+function cleanToolResult(result: string): string {
+  const idx = result.indexOf("\n\n[Reminder: Present interpretations");
+  return idx >= 0 ? result.slice(0, idx) : result;
+}
+
+/**
+ * Reconstruct the multi-round API conversation from a flat blocks array.
+ * Each "round" is a Claude API call that produced some content + tool calls,
+ * followed by tool results fed back as a user message. Round boundaries
+ * are detected when a text block appears after tool_use blocks.
+ */
+function blocksToApiMessages(
+  blocks: ContentBlock[]
+): { role: string; content: unknown[] }[] {
+  const result: { role: string; content: unknown[] }[] = [];
+  let assistantContent: unknown[] = [];
+  let toolResults: unknown[] = [];
+  let hadToolUse = false;
+
+  for (const block of blocks) {
+    if (block.type === "thinking") continue;
+
+    if (block.type === "text") {
+      if (hadToolUse && toolResults.length > 0) {
+        if (assistantContent.length > 0)
+          result.push({ role: "assistant", content: assistantContent });
+        result.push({ role: "user", content: toolResults });
+        assistantContent = [];
+        toolResults = [];
+        hadToolUse = false;
+      }
+      assistantContent.push({ type: "text", text: block.text });
+    } else if (block.type === "tool_use") {
+      if (block.name === "web_search") continue;
+      hadToolUse = true;
+      assistantContent.push({
+        type: "tool_use",
+        id: block.id,
+        name: block.name,
+        input: block.input,
+      });
+      if (block.status === "complete" || block.status === "error") {
+        toolResults.push({
+          type: "tool_result",
+          tool_use_id: block.id,
+          content: cleanToolResult(block.result || ""),
+          ...(block.isError ? { is_error: true } : {}),
+        });
+      }
+    }
+  }
+
+  if (assistantContent.length > 0)
+    result.push({ role: "assistant", content: assistantContent });
+  if (toolResults.length > 0)
+    result.push({ role: "user", content: toolResults });
+
+  return result;
+}
+
+/**
+ * Merge consecutive same-role messages to satisfy the Claude API constraint
+ * that user/assistant messages must alternate. This happens when an assistant
+ * turn ends with tool_results (user role) followed by the next user message.
+ */
+function mergeConsecutiveMessages(
+  msgs: { role: string; content: unknown }[]
+): { role: string; content: unknown }[] {
+  const merged: { role: string; content: unknown }[] = [];
+  for (const msg of msgs) {
+    const prev = merged.length > 0 ? merged[merged.length - 1] : null;
+    if (prev && prev.role === msg.role) {
+      const prevArr = Array.isArray(prev.content)
+        ? prev.content
+        : [{ type: "text", text: prev.content }];
+      const currArr = Array.isArray(msg.content)
+        ? msg.content
+        : [{ type: "text", text: msg.content }];
+      prev.content = [...prevArr, ...currArr];
+    } else {
+      merged.push({
+        role: msg.role,
+        content: Array.isArray(msg.content) ? [...msg.content] : msg.content,
+      });
+    }
+  }
+  return merged;
+}
+
 export interface StreamChatOptions {
   subjectName?: string;
   onboardingStatus?: string;
@@ -260,34 +349,31 @@ export function useStreamChat(sessionIdRef: React.RefObject<string | null>, opts
         }
       };
 
-      const apiMessages = [...messages, userMsg]
-        .filter((m) => m.role !== "system")
-        .map((m) => {
-          if (m.role === "user") {
-            const um = m as UserMessage;
-            if (um.images?.length) {
-              const parts: unknown[] = um.images.map((img) => ({
-                type: "image",
-                source: {
-                  type: "base64",
-                  media_type: img.mediaType,
-                  data: img.data,
-                },
-              }));
-              if (um.content) parts.push({ type: "text", text: um.content });
-              return { role: "user", content: parts };
-            }
-            return { role: "user", content: um.content };
-          }
-          const am = m as AssistantMessage;
-          const content = am.blocks
-            .filter((b) => b.type === "text")
-            .map((b) => ({
-              type: "text",
-              text: (b as { text: string }).text,
+      const rawApiMessages: { role: string; content: unknown }[] = [];
+      for (const m of [...messages, userMsg].filter((m) => m.role !== "system")) {
+        if (m.role === "user") {
+          const um = m as UserMessage;
+          if (um.images?.length) {
+            const parts: unknown[] = um.images.map((img) => ({
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: img.mediaType,
+                data: img.data,
+              },
             }));
-          return { role: "assistant", content };
-        });
+            if (um.content) parts.push({ type: "text", text: um.content });
+            rawApiMessages.push({ role: "user", content: parts });
+          } else {
+            rawApiMessages.push({ role: "user", content: um.content });
+          }
+        } else {
+          const am = m as AssistantMessage;
+          rawApiMessages.push(...blocksToApiMessages(am.blocks));
+        }
+      }
+
+      const apiMessages = mergeConsecutiveMessages(rawApiMessages);
 
       try {
         const systemPrompt =

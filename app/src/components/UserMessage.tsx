@@ -37,7 +37,12 @@ export function UserMessage({ content, images, timestamp }: UserMessageProps) {
           ref={cardRef}
           className={`group relative max-w-3xl mx-auto rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 pt-3 pb-4 overflow-hidden ${needsTruncation ? "cursor-pointer" : ""}`}
           style={isCollapsed ? { maxHeight: COLLAPSED_MAX } : undefined}
-          onClick={() => needsTruncation && setExpanded(!expanded)}
+          onClick={() => {
+            if (!needsTruncation) return;
+            const sel = window.getSelection();
+            if (sel && sel.toString().length > 0) return;
+            setExpanded(!expanded);
+          }}
         >
           {hasImages && (
             <div className="flex flex-wrap gap-2 mb-2">

@@ -302,6 +302,8 @@ pub async fn run_chat_loop(
 
     let mut conversation = messages;
     let final_response;
+    let mut last_round_had_tools = false;
+    let mut nudged_for_summary = false;
 
     const EPISTEMIC_REMINDER: &str = "\n\n[Reminder: Present interpretations as hypotheses, not conclusions. Verify historical claims against data. Ask before narrating the user's experience. Distinguish therapeutic frameworks from established fact.]";
 
@@ -336,6 +338,7 @@ pub async fn run_chat_loop(
                 "role": "assistant",
                 "content": content_without_thinking
             }));
+            last_round_had_tools = false;
             continue;
         }
 
@@ -429,7 +432,63 @@ pub async fn run_chat_loop(
                     "content": tool_results
                 }));
             }
+
+            last_round_had_tools = true;
         } else {
+            // Check if Claude ended after tool execution without producing any text.
+            // This happens when Claude asks a question AND calls tools in the same
+            // response — after the tools complete, it may end_turn with no text,
+            // leaving the user seeing orphaned tool calls with no follow-up.
+            let has_text = response["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks.iter().any(|b| {
+                        b["type"].as_str() == Some("text")
+                            && !b["text"]
+                                .as_str()
+                                .unwrap_or("")
+                                .trim()
+                                .is_empty()
+                    })
+                })
+                .unwrap_or(false);
+
+            if last_round_had_tools && !has_text && !nudged_for_summary {
+                nudged_for_summary = true;
+
+                let content = response["content"].as_array().cloned().unwrap_or_default();
+                let content_without_thinking: Vec<Value> = content
+                    .iter()
+                    .filter(|block| block["type"].as_str() != Some("thinking"))
+                    .cloned()
+                    .collect();
+
+                if content_without_thinking.is_empty() {
+                    // No visible content — append nudge to the last user message
+                    // (the tool_results) to avoid consecutive same-role messages.
+                    if let Some(last_msg) = conversation.last_mut() {
+                        if let Some(arr) = last_msg.get_mut("content").and_then(|c| c.as_array_mut()) {
+                            arr.push(json!({
+                                "type": "text",
+                                "text": "[System: You executed tool calls but produced no text about the results. Please share what you found, then continue the conversation naturally.]"
+                            }));
+                        }
+                    }
+                } else {
+                    conversation.push(json!({
+                        "role": "assistant",
+                        "content": content_without_thinking
+                    }));
+                    conversation.push(json!({
+                        "role": "user",
+                        "content": "[System: You executed tool calls but produced no text about the results. Please share what you found, then continue the conversation naturally.]"
+                    }));
+                }
+
+                last_round_had_tools = false;
+                continue;
+            }
+
             final_response = response;
             break;
         }

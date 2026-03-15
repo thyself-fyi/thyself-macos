@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod dev_server;
 mod onboarding_tools;
+mod clipboard_mac;
 mod pdf;
 mod profiles;
 mod sessions;

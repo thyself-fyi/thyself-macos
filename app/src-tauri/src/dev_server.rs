@@ -1194,22 +1194,9 @@ async fn handle_share_session_pdf(
         return (StatusCode::NOT_FOUND, Json(json!({"error": format!("PDF file not found: {}", pdf_path.display())})));
     }
 
-    let script = format!(
-        "set the clipboard to POSIX file \"{}\"",
-        pdf_path.display()
-    );
-    let output = std::process::Command::new("osascript")
-        .arg("-e")
-        .arg(&script)
-        .output();
-
-    match output {
-        Ok(o) if o.status.success() => (StatusCode::OK, Json(json!({"status": "ok"}))),
-        Ok(o) => {
-            let stderr = String::from_utf8_lossy(&o.stderr);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Clipboard copy failed: {}", stderr)})))
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to run osascript: {}", e)}))),
+    match crate::clipboard_mac::copy_file_to_clipboard(&pdf_path) {
+        Ok(()) => (StatusCode::OK, Json(json!({"status": "ok"}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e}))),
     }
 }
 

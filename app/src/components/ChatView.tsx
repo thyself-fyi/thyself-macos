@@ -31,6 +31,7 @@ interface ChatViewProps {
   onRemoveSource?: (sourceId: string) => void | Promise<void>;
   portraitStatus?: PortraitRunStatus | null;
   onPortraitRefresh?: () => void;
+  onEditMessage?: (index: number, newContent: string) => void;
 }
 
 export function ChatView({
@@ -50,6 +51,7 @@ export function ChatView({
   onRemoveSource,
   portraitStatus,
   onPortraitRefresh,
+  onEditMessage,
 }: ChatViewProps) {
   const { containerRef, isAtBottom, scrollToBottom } = useAutoScroll([
     messages,
@@ -188,7 +190,7 @@ export function ChatView({
         />
       )}
       <div ref={containerRef} className="flex-1 overflow-y-auto relative">
-        <MessageList messages={messages} isStreaming={isStreaming} onAction={onSend} />
+        <MessageList messages={messages} isStreaming={isStreaming} onAction={onSend} onEditMessage={onEditMessage} isReadOnly={isReadOnly} />
       </div>
       {!isAtBottom && messages.length > 0 && (
         <div className="flex justify-center -mt-12 relative z-10">

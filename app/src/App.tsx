@@ -9,7 +9,7 @@ import { SubscriptionGate } from "./components/SubscriptionGate";
 import { DataSourceGrid } from "./components/DataSourceGrid";
 import { useStreamChat } from "./hooks/useStreamChat";
 import { invokeCommand } from "./lib/tauriBridge";
-import type { SessionMeta, Message, SystemMessage, Profile, ImageAttachment, FileAttachment, ContextAttachment } from "./lib/types";
+import type { SessionMeta, Message, SystemMessage, Profile, ImageAttachment, FileAttachment, ContextAttachment, UserMessage as UserMessageType } from "./lib/types";
 
 type AppPhase =
   | { kind: "loading" }
@@ -885,6 +885,28 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     [handleSend]
   );
 
+  const handleEditMessage = useCallback(
+    async (index: number, newContent: string) => {
+      if (isReadOnly) return;
+
+      if (isStreamingHere) {
+        stopStreaming();
+      }
+
+      const original = messages[index];
+      if (!original || original.role !== "user") return;
+      const um = original as UserMessageType;
+
+      setMessages(messages.slice(0, index));
+
+      await sendMessage(newContent, um.images, {
+        sessionKind: activeSessionKind ?? "conversation",
+        context: um.context,
+      }, um.files);
+    },
+    [isReadOnly, isStreamingHere, messages, stopStreaming, setMessages, sendMessage, activeSessionKind]
+  );
+
   // Persist incrementally so refresh/crash during long tool runs
   // (e.g. Gmail import) doesn't lose in-flight chat history.
   // Never save to completed (read-only) sessions.
@@ -1245,6 +1267,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           onRemoveSource={removeSourceFromProfile}
           portraitStatus={portraitStatus as any}
           onPortraitRefresh={fetchPortraitStatus}
+          onEditMessage={handleEditMessage}
         />
       </div>
     </div>

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Folder, FileText, MessageSquare } from "lucide-react";
 import type { ImageAttachment, FileAttachment, ContextAttachment } from "../lib/types";
 
@@ -8,15 +8,20 @@ interface UserMessageProps {
   files?: FileAttachment[];
   context?: ContextAttachment[];
   timestamp: number;
+  onEdit?: (newContent: string) => void;
+  isEditable?: boolean;
 }
 
 const COLLAPSED_MAX = 88;
 
-export function UserMessage({ content, images, files, context, timestamp }: UserMessageProps) {
+export function UserMessage({ content, images, files, context, timestamp, onEdit, isEditable }: UserMessageProps) {
   const [expanded, setExpanded] = useState(false);
   const [needsTruncation, setNeedsTruncation] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
+  const [isEditing, setIsEditing] = useState(false);
+  const [editText, setEditText] = useState(content);
   const cardRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const time = new Date(timestamp).toLocaleTimeString([], {
     hour: "2-digit",
@@ -25,12 +30,60 @@ export function UserMessage({ content, images, files, context, timestamp }: User
 
   useEffect(() => {
     const el = cardRef.current;
-    if (el) {
+    if (el && !isEditing) {
       setNeedsTruncation(el.scrollHeight > COLLAPSED_MAX);
     }
+  }, [content, isEditing]);
+
+  useEffect(() => {
+    if (isEditing && textareaRef.current) {
+      const ta = textareaRef.current;
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.style.height = "auto";
+      ta.style.height = ta.scrollHeight + "px";
+    }
+  }, [isEditing]);
+
+  const handleTextareaInput = useCallback(() => {
+    const ta = textareaRef.current;
+    if (ta) {
+      ta.style.height = "auto";
+      ta.style.height = ta.scrollHeight + "px";
+    }
+  }, []);
+
+  const enterEditMode = useCallback(() => {
+    if (!isEditable || isEditing) return;
+    setEditText(content);
+    setIsEditing(true);
+    setExpanded(true);
+  }, [isEditable, isEditing, content]);
+
+  const cancelEdit = useCallback(() => {
+    setIsEditing(false);
+    setEditText(content);
+    setExpanded(false);
   }, [content]);
 
-  const isCollapsed = needsTruncation && !expanded;
+  const submitEdit = useCallback(() => {
+    const trimmed = editText.trim();
+    if (!trimmed) return;
+    setIsEditing(false);
+    onEdit?.(trimmed);
+  }, [editText, onEdit]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      cancelEdit();
+    } else if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      submitEdit();
+    }
+  }, [cancelEdit, submitEdit]);
+
+  const isCollapsed = needsTruncation && !expanded && !isEditing;
   const hasImages = images && images.length > 0;
   const hasFiles = files && files.length > 0;
   const hasContext = context && context.length > 0;
@@ -40,13 +93,17 @@ export function UserMessage({ content, images, files, context, timestamp }: User
       <div className="sticky top-0 z-10 bg-zinc-950 px-4 pt-4 pb-2">
         <div
           ref={cardRef}
-          className={`group relative max-w-3xl mx-auto rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 pt-3 pb-4 overflow-hidden ${needsTruncation ? "cursor-pointer" : ""}`}
+          className={`group relative max-w-3xl mx-auto rounded-xl border ${isEditing ? "border-zinc-600" : "border-zinc-800"} bg-zinc-900/60 px-4 pt-3 pb-4 overflow-hidden ${!isEditing && (isEditable || needsTruncation) ? "cursor-pointer" : ""}`}
           style={isCollapsed ? { maxHeight: COLLAPSED_MAX } : undefined}
           onClick={() => {
-            if (!needsTruncation) return;
+            if (isEditing) return;
             const sel = window.getSelection();
             if (sel && sel.toString().length > 0) return;
-            setExpanded(!expanded);
+            if (isEditable) {
+              enterEditMode();
+              return;
+            }
+            if (needsTruncation) setExpanded(!expanded);
           }}
         >
           {hasImages && (
@@ -102,12 +159,24 @@ export function UserMessage({ content, images, files, context, timestamp }: User
               ))}
             </div>
           )}
-          {content && (
+          {isEditing ? (
+            <div>
+              <textarea
+                ref={textareaRef}
+                value={editText}
+                onChange={(e) => { setEditText(e.target.value); handleTextareaInput(); }}
+                onKeyDown={handleKeyDown}
+                onBlur={cancelEdit}
+                className="w-full bg-transparent text-sm text-zinc-100 leading-relaxed resize-none outline-none"
+                rows={1}
+              />
+            </div>
+          ) : content ? (
             <div className="text-sm text-zinc-100 leading-relaxed whitespace-pre-wrap">
               {content}
             </div>
-          )}
-          <div className={`mt-1 text-xs text-zinc-600 transition-opacity ${isCollapsed ? "hidden" : "opacity-0 group-hover:opacity-100"}`}>
+          ) : null}
+          <div className={`mt-1 text-xs text-zinc-600 transition-opacity ${isCollapsed || isEditing ? "hidden" : "opacity-0 group-hover:opacity-100"}`}>
             {time}
           </div>
           {isCollapsed && (

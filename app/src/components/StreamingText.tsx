@@ -15,7 +15,7 @@ export function StreamingText({ block }: StreamingTextProps) {
     : [];
 
   return (
-    <div className="text-sm text-zinc-300 leading-relaxed prose-invert max-w-none">
+    <div data-agent-text className="text-sm text-zinc-300 leading-relaxed prose-invert max-w-none">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

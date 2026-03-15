@@ -39,3 +39,14 @@ html, body, #root {
 textarea {
   font-family: inherit;
 }
+
+em-emoji-picker {
+  --em-rgb-background: 24, 24, 27;
+  --em-rgb-input: 39, 39, 42;
+  --em-rgb-color: 228, 228, 231;
+  --em-color-border: #3f3f46;
+  --em-color-border-over: #52525b;
+  border-radius: 0.75rem;
+  border: 1px solid #3f3f46;
+  box-shadow: 0 10px 25px -5px rgb(0 0 0 / 0.5);
+}

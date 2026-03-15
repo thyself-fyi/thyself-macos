@@ -1,7 +1,9 @@
 mod claude;
 mod commands;
+mod datarep_client;
 mod db;
 mod dev_server;
+mod loader;
 mod onboarding_tools;
 mod clipboard_mac;
 mod pdf;

@@ -1,3 +1,4 @@
+use crate::datarep_client::{DatarepClient, DatarepResponse};
 use crate::profiles;
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -318,6 +319,14 @@ pub async fn execute_onboarding_tool(
     tool_input: &Value,
 ) -> Result<Value, String> {
     match tool_name {
+        // --- datarep tools ---
+        "check_datarep" => check_datarep().await,
+        "setup_datarep" => setup_datarep().await,
+        "register_datarep_source" => register_datarep_source(tool_input).await,
+        "datarep_scan" => datarep_scan(tool_input).await,
+        "datarep_import" => datarep_import(tool_input).await,
+        "datarep_auth" => datarep_auth(tool_input).await,
+        // --- legacy tools (kept as fallback) ---
         "scan_message_sources" => scan_message_sources(),
         "open_full_disk_access" => open_full_disk_access(),
         "open_icloud_settings" => open_icloud_settings(),
@@ -344,8 +353,309 @@ pub async fn execute_onboarding_tool(
     }
 }
 
+// ===========================================================================
+// datarep tools
+// ===========================================================================
+
+async fn check_datarep() -> Result<Value, String> {
+    let has_key = profiles::get_datarep_api_key().is_some();
+
+    let client = reqwest::Client::new();
+    let healthy = client
+        .get("http://127.0.0.1:7080/health")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .map(|r| r.status().is_success())
+        .unwrap_or(false);
+
+    if healthy && has_key {
+        Ok(json!({
+            "status": "ready",
+            "message": "datarep is running and Thyself is registered."
+        }))
+    } else if healthy && !has_key {
+        Ok(json!({
+            "status": "needs_registration",
+            "message": "datarep is running but Thyself is not registered. Call setup_datarep to register."
+        }))
+    } else {
+        Ok(json!({
+            "status": "not_running",
+            "message": "datarep is not running. Install with: pip install datarep && datarep init && datarep start"
+        }))
+    }
+}
+
+async fn setup_datarep() -> Result<Value, String> {
+    let output = tokio::process::Command::new("datarep")
+        .args(["app", "register", "thyself", "--sources", "imessage,whatsapp,gmail,chatgpt"])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run datarep: {}. Is datarep installed?", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() {
+        return Err(format!(
+            "datarep app register failed:\nstdout: {}\nstderr: {}",
+            stdout, stderr
+        ));
+    }
+
+    let api_key = stdout
+        .lines()
+        .find(|line| line.contains("dr_"))
+        .and_then(|line| {
+            line.split_whitespace()
+                .find(|word| word.starts_with("dr_"))
+        })
+        .map(|k| k.trim().to_string())
+        .ok_or_else(|| {
+            format!(
+                "Could not find API key (dr_...) in datarep output:\n{}",
+                stdout
+            )
+        })?;
+
+    if let Some(profile_id) = profiles::get_active_profile_id() {
+        profiles::set_datarep_api_key(&profile_id, &api_key)?;
+    }
+
+    Ok(json!({
+        "status": "registered",
+        "message": "Thyself is registered with datarep. API key saved to profile.",
+    }))
+}
+
+async fn register_datarep_source(tool_input: &Value) -> Result<Value, String> {
+    let name = tool_input["name"]
+        .as_str()
+        .ok_or("Missing 'name' parameter")?;
+    let source_type = tool_input["source_type"]
+        .as_str()
+        .ok_or("Missing 'source_type' parameter")?;
+    let config = tool_input
+        .get("config")
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let client = DatarepClient::from_profile()?;
+    let result = client.register_source(name, source_type, config).await?;
+    Ok(result)
+}
+
+async fn datarep_scan(tool_input: &Value) -> Result<Value, String> {
+    let sources = tool_input["sources"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec!["imessage".to_string(), "whatsapp_desktop".to_string()]);
+
+    let client = DatarepClient::from_profile()?;
+    let mut results = json!({});
+
+    for source in &sources {
+        let query = "Count the total number of messages and conversations, and find the earliest and latest message dates. Return as JSON with fields: message_count, conversation_count, earliest_date (ISO8601), latest_date (ISO8601).";
+
+        match client.get(source, query).await {
+            Ok(DatarepResponse::Success { result }) => {
+                let parsed = if let Some(s) = result.as_str() {
+                    // Result might be JSON lines — take the last non-empty line
+                    s.lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .and_then(|l| serde_json::from_str::<Value>(l).ok())
+                        .unwrap_or_else(|| json!({"status": "found", "raw_output": s}))
+                } else {
+                    result.clone()
+                };
+
+                let mut entry = json!({"status": "found"});
+                if let Some(obj) = parsed.as_object() {
+                    for (k, v) in obj {
+                        entry[k] = v.clone();
+                    }
+                }
+                results[source] = entry;
+            }
+            Ok(DatarepResponse::ActionRequired {
+                action_type,
+                explanation,
+                steps,
+                deep_link,
+                ..
+            }) => {
+                results[source] = json!({
+                    "status": if action_type == "os_permission" { "permission_denied" } else { "action_required" },
+                    "action_type": action_type,
+                    "explanation": explanation,
+                    "steps": steps,
+                    "deep_link": deep_link,
+                });
+            }
+            Err(e) => {
+                results[source] = json!({
+                    "status": "error",
+                    "message": e,
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+async fn datarep_import(tool_input: &Value) -> Result<Value, String> {
+    let source = tool_input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+
+    let date_from = tool_input["date_from"].as_str();
+    let date_to = tool_input["date_to"].as_str();
+
+    let client = DatarepClient::from_profile()?;
+    let data_dir = profiles::get_active_data_dir();
+    let db_path = data_dir.join("thyself.db");
+
+    let source_key = match source {
+        "whatsapp_desktop" | "whatsapp_backup" => "whatsapp",
+        other => other,
+    };
+
+    let count_before = rusqlite::Connection::open(&db_path)
+        .ok()
+        .and_then(|conn| source_message_count(&conn, source_key).ok())
+        .unwrap_or(0);
+
+    let run_id = start_sync_run(&db_path, source_key).ok();
+
+    let date_clause = match (date_from, date_to) {
+        (Some(from), Some(to)) => format!(" between {} and {}", from, to),
+        (Some(from), None) => format!(" since {}", from),
+        (None, Some(to)) => format!(" up to {}", to),
+        (None, None) => String::new(),
+    };
+
+    let query = match source_key {
+        "gmail" => format!(
+            "Get all email messages{}. For each message return JSON with fields: gmail_id, thread_id, subject, from_addr, from_name, to_addrs, sent_at (ISO8601), body_text, is_from_me (boolean). Output as JSON lines, one message per line.",
+            date_clause
+        ),
+        "chatgpt" => format!(
+            "Parse the ChatGPT export. For each message return JSON with fields: id, conversation_id, conversation_title, role, text, create_time (unix timestamp). Output as JSON lines, one message per line.",
+        ),
+        _ => format!(
+            "Get all messages{}. For each message return JSON with fields: content, sent_at (ISO8601), is_from_me (boolean), sender_name, sender_phone_or_email, conversation_id, source_message_id. Output as JSON lines, one message per line.",
+            date_clause
+        ),
+    };
+
+    let response = client.get(source, &query).await?;
+
+    match response {
+        DatarepResponse::Success { result } => {
+            let json_lines = if let Some(s) = result.as_str() {
+                s.to_string()
+            } else {
+                result.to_string()
+            };
+
+            let import_result =
+                crate::loader::load_messages_from_json(&db_path, &json_lines, source)?;
+
+            let count_after = rusqlite::Connection::open(&db_path)
+                .ok()
+                .and_then(|conn| source_message_count(&conn, source_key).ok())
+                .unwrap_or(count_before);
+            let messages_added = count_after.saturating_sub(count_before);
+
+            let last_message_at =
+                source_last_message_at_from_db(&db_path, source_key);
+
+            if let Some(id) = run_id {
+                let _ = finish_sync_run(
+                    &db_path,
+                    id,
+                    messages_added,
+                    last_message_at.clone(),
+                    None,
+                );
+            }
+
+            ensure_sync_installed();
+
+            Ok(json!({
+                "status": "ok",
+                "source": source,
+                "messages_added": messages_added,
+                "messages_loaded": import_result.messages,
+                "conversations": import_result.conversations,
+                "contacts": import_result.contacts,
+                "earliest": import_result.earliest,
+                "latest": import_result.latest,
+                "last_message_at": last_message_at,
+            }))
+        }
+        DatarepResponse::ActionRequired {
+            action_type,
+            explanation,
+            steps,
+            deep_link,
+            ..
+        } => {
+            if let Some(id) = run_id {
+                let _ = finish_sync_run(&db_path, id, 0, None, Some(explanation.clone()));
+            }
+            Ok(json!({
+                "status": "action_required",
+                "action_type": action_type,
+                "explanation": explanation,
+                "steps": steps,
+                "deep_link": deep_link,
+            }))
+        }
+    }
+}
+
+fn source_last_message_at_from_db(db_path: &std::path::Path, source: &str) -> Option<String> {
+    rusqlite::Connection::open(db_path)
+        .ok()
+        .and_then(|conn| source_last_message_at(&conn, source).ok().flatten())
+}
+
+async fn datarep_auth(tool_input: &Value) -> Result<Value, String> {
+    let source = tool_input["source"]
+        .as_str()
+        .ok_or("Missing 'source' parameter")?;
+
+    let client = DatarepClient::from_profile()?;
+
+    if let Some(cred_data) = tool_input.get("credentials") {
+        let cred_type = tool_input["cred_type"]
+            .as_str()
+            .unwrap_or("custom");
+        client.store_credentials(source, cred_type, cred_data.clone()).await?;
+        return Ok(json!({
+            "status": "credentials_stored",
+            "source": source,
+        }));
+    }
+
+    let result = client.initiate_oauth(source).await?;
+    Ok(json!({
+        "status": "authenticated",
+        "source": source,
+        "details": result,
+    }))
+}
+
 // ---------------------------------------------------------------------------
-// scan_message_sources
+// scan_message_sources (legacy — kept as fallback)
 // ---------------------------------------------------------------------------
 
 fn scan_message_sources() -> Result<Value, String> {
@@ -1211,7 +1521,7 @@ async fn import_messages(tool_input: &Value) -> Result<Value, String> {
             ensure_sync_installed();
         }
 
-        Ok(json!({
+        let mut result = json!({
             "status": "ok",
             "output": stdout,
             "source": source,
@@ -1219,7 +1529,11 @@ async fn import_messages(tool_input: &Value) -> Result<Value, String> {
             "sync_source": source_key,
             "messages_added": messages_added,
             "last_message_at": last_message_at,
-        }))
+        });
+        if !stderr.trim().is_empty() {
+            result["stderr"] = Value::String(stderr);
+        }
+        Ok(result)
     } else {
         if let Some(id) = run_id {
             let _ = finish_sync_run(&db_path, id, 0, None, Some(stderr.clone()));
@@ -1590,6 +1904,108 @@ fn ensure_sync_installed() {
 
 pub fn get_onboarding_tool_definitions() -> Vec<Value> {
     vec![
+        // --- datarep tools ---
+        json!({
+            "name": "check_datarep",
+            "description": "Check if datarep is running and Thyself is registered. Returns status: 'ready' (datarep running + registered), 'needs_registration' (running but not registered), or 'not_running'. Call this at the start of onboarding before any source operations.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "setup_datarep",
+            "description": "Register Thyself with datarep and save the API key. Call this when check_datarep returns 'needs_registration'. This runs 'datarep app register thyself' and stores the resulting API key in the profile.",
+            "input_schema": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }),
+        json!({
+            "name": "register_datarep_source",
+            "description": "Register a data source with datarep. Must be called before datarep_scan or datarep_import for that source. Source types: 'local_db' for SQLite databases (iMessage, WhatsApp), 'rest_api' for APIs (Gmail), 'local_files' for file directories (ChatGPT export).",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "description": "Source name (e.g. 'imessage', 'whatsapp_desktop', 'gmail', 'chatgpt')"
+                    },
+                    "source_type": {
+                        "type": "string",
+                        "enum": ["local_db", "rest_api", "local_files"],
+                        "description": "Type of data source"
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "Source-specific configuration. For local_db: {path: '...'}. For rest_api: {base_url: '...', auth_url: '...', token_url: '...', scopes: [...]}. For local_files: {path: '...'}."
+                    }
+                },
+                "required": ["name", "source_type", "config"]
+            }
+        }),
+        json!({
+            "name": "datarep_scan",
+            "description": "Scan registered data sources for message counts, conversation counts, and date ranges. Uses datarep's agent to inspect each source. Returns per-source stats. If a source requires OS permissions (e.g. Full Disk Access), returns status 'permission_denied' with guidance.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "sources": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Source names to scan (default: ['imessage', 'whatsapp_desktop'])"
+                    }
+                },
+                "required": []
+            }
+        }),
+        json!({
+            "name": "datarep_import",
+            "description": "Import messages from a data source via datarep. datarep's agent retrieves the data, then Thyself loads it into thyself.db. Supports all source types. Use date_from/date_to to import in chunks for large datasets.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Source name (e.g. 'imessage', 'whatsapp_desktop', 'gmail', 'chatgpt')"
+                    },
+                    "date_from": {
+                        "type": "string",
+                        "description": "Optional ISO8601 start date for chunked imports"
+                    },
+                    "date_to": {
+                        "type": "string",
+                        "description": "Optional ISO8601 end date for chunked imports"
+                    }
+                },
+                "required": ["source"]
+            }
+        }),
+        json!({
+            "name": "datarep_auth",
+            "description": "Initiate authentication for a data source via datarep. For OAuth sources (Gmail), this opens the browser for sign-in. For API key sources, pass credentials in the 'credentials' field. Call register_datarep_source first.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "string",
+                        "description": "Source name to authenticate"
+                    },
+                    "cred_type": {
+                        "type": "string",
+                        "description": "Credential type: 'oauth2', 'api_key', 'custom'"
+                    },
+                    "credentials": {
+                        "type": "object",
+                        "description": "Optional credentials data to store (for non-OAuth flows)"
+                    }
+                },
+                "required": ["source"]
+            }
+        }),
+        // --- legacy tools (kept for backward compatibility) ---
         json!({
             "name": "scan_message_sources",
             "description": "Scan this Mac for iMessage and WhatsApp databases. Returns message counts, conversation counts, and date ranges for each source found. Use this as the first step to understand what message data is available locally.",

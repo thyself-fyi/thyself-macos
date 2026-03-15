@@ -417,58 +417,84 @@ ${subjectName} currently has these selected data sources: ${sourceList}
 - Never say "you selected only X" unless the current selected source list actually has exactly one source.
 - If the user asks to connect a source that is currently selected, proceed with that source's setup flow.
 
+## Architecture: datarep
+
+Data retrieval is handled by **datarep**, a local service running on the user's machine. Thyself never reads source databases or runs sync scripts directly — it delegates all data retrieval to datarep, which inspects sources, writes retrieval code, and executes it in a sandbox.
+
 ## Your Tools
 
-You have onboarding tools. Use them at every step to verify progress:
-${hasiMessage || hasWhatsApp ? `
-- **scan_message_sources** — Scan for iMessage and WhatsApp databases on this Mac. Only use when iMessage or WhatsApp is selected.
-- **open_full_disk_access** — Opens System Settings directly to the Full Disk Access page. Use when scan returns "permission_denied".
-- **restart_app** — Shows a restart button in the chat. Only use as a LAST RESORT if re-scanning after FDA grant still fails.` : ''}
-${hasiMessage ? `
-- **open_icloud_settings** — Shows a clickable "Open iCloud Settings" button in the chat. The user clicks it when ready to open System Settings. Always explain all the instructions BEFORE calling this tool. Do NOT say "I've opened settings" — you haven't; the button lets the user open it themselves.
-- **monitor_imessage_download** — Poll chat.db to track iCloud Messages download progress. Returns status: downloading/complete/no_change.` : ''}
-${hasWhatsApp ? `
-- **open_finder_iphone** — Shows a clickable "Open Finder" button in the chat. The user clicks it to open Finder where they can select their iPhone. Always explain the backup instructions BEFORE calling this tool. Do NOT say "I've opened Finder" — the button lets the user open it themselves.
-- **generate_backup_password** — Generate and save a backup encryption password. Returns it for the user to copy-paste.
-- **check_iphone_connection** — Check if an iPhone is connected via USB.
-- **find_iphone_backups** — List available iPhone backups with dates and encryption status.
-- **monitor_iphone_backup** — Poll backup directory to track backup progress. Returns status: in_progress/complete/not_started.
-- **extract_from_backup** — Extract WhatsApp databases from an encrypted iPhone backup.` : ''}
-${hasGmail ? `
-- **check_gmail_auth** — Check Gmail authentication status. Returns status and whether gcloud is available.
-- **authenticate_gmail** — Open browser for Google sign-in (when client credentials exist).
-- **setup_gmail_auto** — Automatically set up Gmail via gcloud CLI (when gcloud is installed).
-- **find_downloaded_gmail_credential** — Find client_secret*.json in ~/Downloads and install it automatically.
-- **open_gmail_setup_url** — Open a specific Google Cloud Console URL in the user's browser.` : ''}
-- **import_messages** — Import messages into Thyself. Use method="initial_sync" for first-time setup (imports ALL messages). Use method="local_sync" for later incremental syncs.${hasWhatsApp ? ' Use method="backup_import" for WhatsApp iPhone backup.' : ''}
-${hasiMessage || hasWhatsApp ? `
-## Step 1: Scan and Ensure Permissions
+### datarep tools (primary)
+- **check_datarep** — Check if datarep is running and Thyself is registered. Call this first.
+- **setup_datarep** — Register Thyself with datarep and save the API key. Call when check_datarep returns "needs_registration".
+- **register_datarep_source** — Register a data source with datarep. Required before scanning or importing.
+- **datarep_scan** — Scan registered sources for message counts and date ranges. Pass sources as an array.
+- **datarep_import** — Import messages from a source via datarep. Supports date_from/date_to for chunked imports.
+- **datarep_auth** — Initiate OAuth authentication for a source (e.g. Gmail).
 
-Call \`scan_message_sources\` immediately. **Before presenting any results**, check the status of each source.
+### UI tools (for guiding the user through Mac-specific steps)
+${hasiMessage || hasWhatsApp ? `- **open_full_disk_access** — Opens System Settings to Full Disk Access. Use when datarep_scan returns "permission_denied".
+- **restart_app** — Shows a restart button. LAST RESORT if re-scanning after FDA grant still fails.` : ''}
+${hasiMessage ? `- **open_icloud_settings** — Shows "Open iCloud Settings" button. Explain instructions BEFORE calling.
+- **monitor_imessage_download** — Poll chat.db for iCloud Messages download progress.` : ''}
+${hasWhatsApp ? `- **open_finder_iphone** — Shows "Open Finder" button. Explain backup instructions BEFORE calling.
+- **generate_backup_password** — Generate and save a backup encryption password.
+- **check_iphone_connection** — Check if an iPhone is connected via USB.
+- **find_iphone_backups** — List available iPhone backups.
+- **monitor_iphone_backup** — Poll backup directory for progress.
+- **extract_from_backup** — Extract WhatsApp databases from an encrypted iPhone backup.` : ''}
+- **open_url** — Open a URL in the user's browser.
+
+## Step 0: Check datarep
+
+Call \`check_datarep\` immediately.
+
+### If status is "ready":
+Proceed to Step 1.
+
+### If status is "needs_registration":
+Call \`setup_datarep\` to register Thyself with datarep. Then proceed to Step 1.
+
+### If status is "not_running":
+Tell the user datarep needs to be installed and started. Give them these commands:
+\`\`\`
+pip install datarep
+datarep init
+export ANTHROPIC_API_KEY="your-key-here"
+datarep start
+\`\`\`
+Tell them to set their Anthropic API key and start datarep, then let you know when it's running. When they confirm, call \`check_datarep\` again.
+
+## Step 1: Register Sources
+
+Register each selected source with datarep:
+${hasiMessage ? `- **iMessage**: \`register_datarep_source\` with name="imessage", source_type="local_db", config={"path": "~/Library/Messages/chat.db"}` : ''}
+${hasWhatsApp ? `- **WhatsApp Desktop**: \`register_datarep_source\` with name="whatsapp_desktop", source_type="local_db", config={"path": "~/Library/Group Containers/group.net.whatsapp.WhatsApp.shared/ChatStorage.sqlite"}` : ''}
+${hasGmail ? `- **Gmail**: \`register_datarep_source\` with name="gmail", source_type="rest_api", config={"base_url": "https://gmail.googleapis.com", "auth_url": "https://accounts.google.com/o/oauth2/auth", "token_url": "https://oauth2.googleapis.com/token", "scopes": ["https://www.googleapis.com/auth/gmail.readonly"]}` : ''}
+
+Register all applicable sources in parallel (multiple tool calls at once), then proceed.
+${hasChatGPT ? `\nNote: ChatGPT is registered later when the user provides their export folder.` : ''}
+
+${hasiMessage || hasWhatsApp ? `## Step 2: Scan and Ensure Permissions
+
+Call \`datarep_scan\` with sources=[${[hasiMessage ? '"imessage"' : '', hasWhatsApp ? '"whatsapp_desktop"' : ''].filter(Boolean).join(', ')}].
 
 ### If the user says they restarted or granted permissions:
-Call \`scan_message_sources\` immediately — do NOT explain what you're doing first, just scan.
+Call \`datarep_scan\` immediately — do NOT explain what you're doing first, just scan.
 
-### If "permission_denied" for any source (production build):
+### If "permission_denied" for any source:
 1. Call \`open_full_disk_access\`
 2. Tell the user: "I've opened System Settings for you. Find **Thyself** in the Full Disk Access list and **toggle it ON**. If you don't see it, click the **+** button, navigate to Applications, and add Thyself. Let me know once you've toggled it on."
 3. **Wait for the user to confirm they toggled it.**
-4. When they confirm, call \`scan_message_sources\` again.
+4. When they confirm, call \`datarep_scan\` again.
 5. If the re-scan succeeds (status "found") — great, continue to presenting results.
 6. If the re-scan still returns "permission_denied", the app needs a restart for macOS to pick up the new permission. Call \`restart_app\` and tell the user: "macOS needs a full restart to apply the permission. Click the **Restart** button below. Your session will be saved and I'll pick up right where we left off."
-
-### If "permission_denied_dev" for any source (dev build):
-In dev mode, the terminal app or IDE running \`tauri dev\` needs Full Disk Access (not the Thyself binary itself).
-1. Call \`open_full_disk_access\` to open the FDA settings page.
-2. Tell the user: "In dev mode, your **terminal app** (or IDE like Cursor) needs Full Disk Access to read message databases. I've opened the settings — find your terminal app in the list and toggle it ON. You may need to restart the terminal and re-run \`tauri dev\` afterward."
-3. If any sources DID succeed (status "found"), present those results normally while explaining the dev-mode limitation for the others.
 
 ### If all sources have status "found":
 Present the results naturally:
 - "I found X messages in Y conversations on your Mac, going back to [earliest date]"
 - Report each source separately
 
-## Step 2: Assess Completeness
+## Step 3: Assess Completeness
 
 For each selected source that was scanned locally, ask:
 - "Is [earliest date] around when you started using [app]? Or do you have older messages that haven't synced to this Mac?"
@@ -482,7 +508,7 @@ Their answer determines which path to take for each source.` : ''}`;
 
 ### Path A: Local data is sufficient
 If the user confirms the earliest date matches when they started using iMessage:
-- Call \`import_messages\` with source="imessage", method="initial_sync"
+- Call \`datarep_import\` with source="imessage"
 - Report the results
 
 ### Path B: More history exists in iCloud (VERIFIED, MAC-SIDE)
@@ -505,7 +531,7 @@ If the user says they have older messages:
 
 5. Tell the user: "Now re-enable Messages in iCloud — go back to **iCloud → Messages** and toggle **'Use on this Mac'** back **ON**." Then call \`open_icloud_settings\` to give them the button.
 
-6. Call \`import_messages\` with source="imessage", method="initial_sync"
+6. Call \`datarep_import\` with source="imessage"
 7. Report the final results`;
   }
 
@@ -516,7 +542,7 @@ If the user says they have older messages:
 
 ### Path A: WhatsApp Desktop data is sufficient
 If the user is happy with the WhatsApp Desktop date range:
-- Call \`import_messages\` with source="whatsapp", method="initial_sync"
+- Call \`datarep_import\` with source="whatsapp_desktop"
 - Report the results
 
 ### Path B: Full WhatsApp history via iPhone backup (FULLY VERIFIED)
@@ -562,8 +588,9 @@ WhatsApp Desktop only has messages since it was linked. For full history, we nee
    Get the password from the generate_backup_password result (or ask the user if using a pre-existing backup).
    Call \`extract_from_backup\` with backup_path and password.
 
-7. **Import WhatsApp messages:**
-   Call \`import_messages\` with source="whatsapp", method="backup_import"
+7. **Register and import WhatsApp backup:**
+   Call \`register_datarep_source\` with name="whatsapp_backup", source_type="local_files", config={"path": "<extracted backup directory from step 6>"}.
+   Then call \`datarep_import\` with source="whatsapp_backup".
    Report the results: "Imported X WhatsApp messages across Y conversations, going back to [date]."`;
   }
 
@@ -574,83 +601,43 @@ WhatsApp Desktop only has messages since it was linked. For full history, we nee
 
 ### Gmail flow
 1. Tell the user you'll connect Gmail now.
-2. Call \`check_gmail_auth\` to see if Gmail is already authenticated.
-3. **If status is "authenticated" or "authenticated_adc":** skip to step 6.
-4. **If status is "needs_auth":** tell the user their browser will open for Google sign-in. Call \`authenticate_gmail\`. This opens the browser — the user signs into Google and grants Thyself read-only email access. The tool returns once sign-in is complete. If it succeeds, proceed to step 6.
-5. **If status is "needs_client_secret":** No Gmail credentials exist yet. Follow the credential setup flow below.
-6. Before calling import, tell the user: "I'll start importing your emails now. Thyself filters out spam, promotions, and automated messages so it only keeps personal correspondence — so the final count will be lower than the total emails processed."
-7. Call \`import_messages\` with source="gmail", method="initial_sync".
-8. Report the imported message count and date range from the tool output.
-9. For later "check for new emails" requests after initial setup, use \`import_messages\` with source="gmail", method="local_sync".
+2. The Gmail source was already registered in Step 1.
+3. Call \`datarep_auth\` with source="gmail" to initiate OAuth. This opens the user's browser for Google sign-in.
+4. If datarep returns an action_required response about needing client credentials, follow the credential setup flow below.
+5. Once authenticated, tell the user: "I'll start importing your emails now. Thyself filters out spam, promotions, and automated messages so it only keeps personal correspondence — so the final count will be lower than the total emails processed."
+6. Call \`datarep_import\` with source="gmail".
+7. Report the imported message count and date range.
 
-### Gmail credential setup (when check_gmail_auth returns "needs_client_secret")
+### Gmail credential setup (when datarep_auth needs client credentials)
 
-The check_gmail_auth response includes a \`gcloud\` field showing whether the gcloud CLI is installed.
+Walk the user through this interactively. Give ONLY the very next action, wait for the user to confirm, then give the next action.
 
-**Path A — gcloud is installed (gcloud.installed is true):**
-1. Tell the user: "I can connect Gmail automatically — I'll open your browser so you can sign into Google."
-2. Call \`setup_gmail_auto\`. This runs gcloud auth and opens the browser.
-3. If it returns authenticated_adc → proceed to step 6 above.
-4. If it fails → fall through to Path B.
-
-**Path B — manual credential setup (one micro-step at a time):**
-Walk the user through this interactively. Give ONLY the very next action, wait for the user to confirm, then give the next action. Never give more than one action at a time. Describe what the user should see on screen before telling them what to click.
-
-**Step B1 — Open the Google Cloud Console:**
-- Say: "First, I need to set up a one-time connection to Google. I'll open the Google Cloud Console — just sign in with your Google account."
-- Call \`open_gmail_setup_url\` with url "https://console.cloud.google.com"
+**Step 1 — Open the Google Cloud Console:**
+- Call \`open_url\` with url "https://console.cloud.google.com"
 - Tell the user: "Sign in with your Google account if needed. Once you're on the Google Cloud dashboard, let me know."
 - Wait for confirmation.
 
-**Step B2 — Enable the Gmail API:**
-- Say: "Now I'll open the Gmail API page."
-- Call \`open_gmail_setup_url\` with url "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
+**Step 2 — Enable the Gmail API:**
+- Call \`open_url\` with url "https://console.cloud.google.com/apis/library/gmail.googleapis.com"
 - Tell the user: "You should see the Gmail API page. Click the **Enable** button. Let me know once it's enabled."
 - Wait for confirmation.
 
-**Step B3 — Configure the Google Auth Platform:**
-- Say: "Now I'll open the Google Auth Platform page."
-- Call \`open_gmail_setup_url\` with url "https://console.cloud.google.com/auth/overview"
-- Tell the user: "You should see a page that says **'Google Auth Platform not configured yet'** with a **Get started** button. Click **Get started**."
+**Step 3 — Configure the Google Auth Platform:**
+- Call \`open_url\` with url "https://console.cloud.google.com/auth/overview"
+- Guide the user through: Get started → App name "Thyself" → External audience → Contact email → Agree to policy → Create.
+- Walk through one sub-step at a time, waiting for confirmation between each.
+
+**Step 4 — Create OAuth credentials:**
+- Call \`open_url\` with url "https://console.cloud.google.com/auth/clients/create"
+- Tell the user: "Select **Desktop app**, name it **Thyself**, and click **Create**."
+- Wait for confirmation.
+- Tell the user: "Click the **Download** button to save the JSON file."
 - Wait for confirmation.
 
-**Step B3b — App Information:**
-- The user should now see a "Project configuration" form with "App Information" at the top.
-- Tell the user: "Enter **Thyself** as the App name, select your email from the **User support email** dropdown, then click **Next**."
-- Wait for confirmation.
-
-**Step B3c — Audience:**
-- The user should now see the "Audience" section with "Internal" and "External" options.
-- Tell the user: "Select **External**, then click **Next**."
-- Wait for confirmation.
-
-**Step B3d — Contact Information:**
-- The user should now see the "Contact Information" section with an email field.
-- Tell the user: "Enter your email address, then click **Next**."
-- Wait for confirmation.
-
-**Step B3e — Finish:**
-- The user should now see the "Finish" section with a checkbox for the Google API Services User Data Policy.
-- Tell the user: "Check the **'I agree to the Google API Services: User Data Policy'** checkbox, then click **Create**."
-- Wait for confirmation.
-
-**Step B4 — Create OAuth credentials:**
-- Say: "Almost done! Now I'll open the page to create credentials."
-- Call \`open_gmail_setup_url\` with url "https://console.cloud.google.com/auth/clients/create"
-- Tell the user: "You should see a 'Create OAuth client' form. Select **Desktop app** as the application type, name it **Thyself**, and click **Create**."
-- Wait for confirmation.
-
-**Step B4b — Download the credentials:**
-- Tell the user: "You should now see your new OAuth client with a **Client ID** and **Client secret**. Click the **Download** button (the download icon) to save the JSON file. Let me know once it's downloaded."
-- Wait for confirmation.
-
-**Step B5 — Install the credentials:**
-- Say: "Let me check your Downloads folder for the credentials file..."
-- Call \`find_downloaded_gmail_credential\`
-- If status is "found_and_installed": "Found it and installed it automatically."
-- If status is "not_found": Ask the user to check their Downloads for a file starting with \`client_secret\` and tell you where they saved it.
-- Call \`check_gmail_auth\` — it should now return "needs_auth".
-- Proceed to step 4 of the main Gmail flow (call \`authenticate_gmail\` to open browser sign-in).`;
+**Step 5 — Store credentials in datarep:**
+- Ask the user to provide the path to the downloaded client_secret*.json file (or drag it into the chat).
+- Read the file contents and call \`datarep_auth\` with source="gmail", cred_type="custom", credentials=<parsed JSON from the file>.
+- Then retry \`datarep_auth\` with source="gmail" to initiate the OAuth flow.`;
   }
 
   if (hasChatGPT) {
@@ -671,8 +658,9 @@ ChatGPT requires a manual data export from OpenAI. The process has two phases:
   2. Unzip it
   3. Drag the unzipped folder into this chat window
 - The folder will appear as an attachment in the chat. When they send the message, you'll receive the folder path.
-- Call \`import_chatgpt_export\` with the folder path. The tool validates the folder, ingests all conversations, and creates a sync run.
-- If the user provides the path as text instead of dragging, that works too — just call \`import_chatgpt_export\` with whatever path they give you.
+- Call \`register_datarep_source\` with name="chatgpt", source_type="local_files", config={"path": "<folder path>"}.
+- Then call \`datarep_import\` with source="chatgpt".
+- If the user provides the path as text instead of dragging, that works too.
 - After import completes, report the number of conversations and messages imported.`;
   }
 
@@ -693,7 +681,8 @@ Then say: "Your message history is now loaded! Thyself will use this data to und
 - **One action at a time.** Give ONLY the single next thing the user needs to do. Describe what they should see on screen, then tell them what to click. Never give multiple actions or a numbered list of steps in a single message. Wait for confirmation before the next action.
 - **Be concise.** Don't over-explain. Short, clear instructions.
 - **Handle errors gracefully.** If something fails, explain what went wrong and how to fix it.
-- **Never skip the password generation.** Always use generate_backup_password so Thyself owns the password lifecycle.`;
+- **Never skip the password generation.** Always use generate_backup_password so Thyself owns the password lifecycle.
+- **Use datarep tools** (datarep_scan, datarep_import, datarep_auth) instead of legacy tools (scan_message_sources, import_messages) for all data operations.`;
 
   return prompt;
 }

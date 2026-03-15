@@ -37,13 +37,16 @@ interface DiagnosticSnapshot {
 }
 
 interface FeedbackRequest {
-  type: "bug" | "feedback";
+  type: "bug" | "feedback" | "auto-diagnostic";
   message: string;
   email?: string;
   appVersion?: string;
   os?: string;
   diagnostics?: DiagnosticSnapshot;
   screenshot?: string; // base64 data URL
+  toolName?: string;
+  toolInput?: string;
+  errorContent?: string;
 }
 
 const REPO = "thyself-fyi/thyself-feedback";
@@ -199,6 +202,64 @@ function buildIssueBody(body: FeedbackRequest, screenshotUrl: string | null): st
   return md;
 }
 
+function buildDiagnosticBody(body: FeedbackRequest): string {
+  const diag = body.diagnostics;
+  const appVersion = diag?.appVersion || body.appVersion || "unknown";
+  const os = diag?.os || body.os || "unknown";
+  const userName = diag?.userName || "unknown";
+
+  let md = `### Error\n\n`;
+  md += `**Tool:** \`${body.toolName}\``;
+  if (body.toolInput && body.toolInput !== "{}") {
+    const inputPreview = body.toolInput.length > 200
+      ? body.toolInput.slice(0, 200) + "…"
+      : body.toolInput;
+    md += ` | **Input:** \`${inputPreview}\``;
+  }
+  md += "\n\n```\n" + (body.errorContent || "No error content") + "\n```\n";
+
+  md += "\n---\n";
+  md += `\n**User:** ${userName}`;
+  md += ` · **App version:** ${appVersion} · **OS:** ${os}`;
+  if (diag?.sessionKind) {
+    md += ` · **Session:** ${diag.sessionKind}`;
+  }
+  md += "\n";
+
+  if (diag) {
+    const collapsedParts: string[] = [];
+
+    if (diag.conversation && diag.conversation.length > 0) {
+      collapsedParts.push("**Conversation**\n\n" + formatConversation(diag.conversation));
+    }
+
+    const syncTable = formatSyncTable(diag.syncStatus);
+    if (syncTable !== "_No sync data available_" && syncTable !== "_No sync runs recorded_") {
+      collapsedParts.push("**Sync Status**\n" + syncTable);
+    }
+
+    const logs = diag.consoleLogs ?? [];
+    const errors = logs.filter((l) => l.level === "error");
+    if (errors.length > 0) {
+      collapsedParts.push("**Console Errors**\n```\n" + formatLogs(errors) + "\n```");
+    }
+
+    collapsedParts.push(
+      "**Environment**\n" +
+      `- Window: ${diag.windowSize.width}×${diag.windowSize.height}\n` +
+      `- User Agent: ${diag.userAgent}\n` +
+      `- Collected at: ${diag.timestamp}`
+    );
+
+    md += "\n<details>\n<summary>Diagnostics</summary>\n\n";
+    md += collapsedParts.join("\n\n");
+    md += "\n\n</details>\n";
+  }
+
+  md += "\n_Auto-reported by Thyself client_\n";
+  return md;
+}
+
 const WORKER_PUBLIC_URL = "https://thyself-feedback.jfru.workers.dev";
 
 async function storeScreenshot(
@@ -284,13 +345,24 @@ export default {
       );
     }
 
+    const isAutoDiag = body.type === "auto-diagnostic";
     const isBug = body.type === "bug";
-    const prefix = isBug ? "[Bug]" : "[Feedback]";
-    const firstLine = body.message.trim().split("\n")[0];
-    const title = `${prefix} ${firstLine.slice(0, 80)}${firstLine.length > 80 ? "..." : ""}`;
 
-    // Create issue without screenshot first
-    let issueBody = buildIssueBody(body, null);
+    let title: string;
+    let issueBody: string;
+    let labels: string[];
+
+    if (isAutoDiag) {
+      title = `[Diagnostic] ${body.toolName || "unknown"} failed`;
+      issueBody = buildDiagnosticBody(body);
+      labels = ["auto-diagnostic"];
+    } else {
+      const prefix = isBug ? "[Bug]" : "[Feedback]";
+      const firstLine = body.message.trim().split("\n")[0];
+      title = `${prefix} ${firstLine.slice(0, 80)}${firstLine.length > 80 ? "..." : ""}`;
+      issueBody = buildIssueBody(body, null);
+      labels = [isBug ? "bug" : "enhancement"];
+    }
 
     const ghResponse = await fetch(
       `https://api.github.com/repos/${REPO}/issues`,
@@ -305,7 +377,7 @@ export default {
         body: JSON.stringify({
           title,
           body: issueBody,
-          labels: [isBug ? "bug" : "enhancement"],
+          labels,
         }),
       }
     );
@@ -321,8 +393,7 @@ export default {
 
     const issue = (await ghResponse.json()) as { number: number };
 
-    // Store screenshot in KV and update issue with public URL
-    if (body.screenshot) {
+    if (body.screenshot && !isAutoDiag) {
       const screenshotUrl = await storeScreenshot(
         env.FEEDBACK_CONTACTS,
         body.screenshot,

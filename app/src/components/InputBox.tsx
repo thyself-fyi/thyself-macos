@@ -1,8 +1,11 @@
-import { useState, useRef, useEffect, useCallback, DragEvent, ClipboardEvent } from "react";
-import { Send, Square, Paperclip, X, Folder, FileText } from "lucide-react";
+import { useState, useRef, useEffect, useCallback, DragEvent, ClipboardEvent, lazy, Suspense } from "react";
+import { Send, Square, Paperclip, X, Folder, FileText, Smile } from "lucide-react";
 import type { ImageAttachment, FileAttachment, ContextAttachment } from "../lib/types";
 import { isTauri } from "../lib/tauriBridge";
 import { MentionDropdown } from "./MentionDropdown";
+
+const EmojiPicker = lazy(() => import("@emoji-mart/react").then(mod => ({ default: mod.default })));
+import emojiData from "@emoji-mart/data";
 
 const ACCEPTED_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp"]);
 const MAX_FILE_SIZE = 20 * 1024 * 1024;
@@ -22,6 +25,8 @@ interface InputBoxProps {
   onConsumeDroppedFiles?: (files: FileAttachment[]) => FileAttachment[];
   isTauriDragging?: boolean;
   placeholder?: string;
+  quotedText?: string | null;
+  onClearQuote?: () => void;
 }
 
 function fileToAttachment(file: File): Promise<ImageAttachment | null> {
@@ -46,9 +51,11 @@ function fileToAttachment(file: File): Promise<ImageAttachment | null> {
 function extractContentFromEditable(el: HTMLElement): {
   text: string;
   context: ContextAttachment[];
+  quoteText: string | null;
 } {
   const context: ContextAttachment[] = [];
   const parts: string[] = [];
+  let quoteText: string | null = null;
 
   function walk(node: Node) {
     if (node.nodeType === Node.TEXT_NODE) {
@@ -58,6 +65,11 @@ function extractContentFromEditable(el: HTMLElement): {
 
       if (elem.tagName === "BR") {
         parts.push("\n");
+        return;
+      }
+
+      if (elem.dataset.quoteText) {
+        quoteText = elem.dataset.quoteText;
         return;
       }
 
@@ -87,7 +99,7 @@ function extractContentFromEditable(el: HTMLElement): {
     walk(child);
   }
 
-  return { text: parts.join(""), context };
+  return { text: parts.join(""), context, quoteText };
 }
 
 function getMentionQueryAtCursor(el: HTMLElement): {
@@ -139,6 +151,29 @@ function createMentionPill(item: ContextAttachment): HTMLSpanElement {
   return pill;
 }
 
+const MAX_QUOTE_PILL_LENGTH = 80;
+
+function createQuotePill(text: string): HTMLSpanElement {
+  const pill = document.createElement("span");
+  pill.contentEditable = "false";
+  pill.dataset.quoteText = text;
+  const truncated = text.length > MAX_QUOTE_PILL_LENGTH
+    ? text.slice(0, MAX_QUOTE_PILL_LENGTH).trimEnd() + "\u2026"
+    : text;
+  const display = truncated.replace(/\n/g, " ");
+  pill.className =
+    "inline-flex items-center gap-1 rounded bg-purple-500/20 text-purple-300 px-1.5 py-0.5 text-xs font-medium mx-0.5 align-baseline select-all cursor-default whitespace-nowrap max-w-[300px]";
+  const label = document.createElement("span");
+  label.className = "italic opacity-70";
+  label.textContent = "reply:";
+  const content = document.createElement("span");
+  content.className = "truncate";
+  content.textContent = display;
+  pill.appendChild(label);
+  pill.appendChild(content);
+  return pill;
+}
+
 export function InputBox({
   onSend,
   onStop,
@@ -149,11 +184,14 @@ export function InputBox({
   onConsumeDroppedFiles,
   isTauriDragging,
   placeholder = "What's on your mind?",
+  quotedText,
+  onClearQuote,
 }: InputBoxProps) {
   const [images, setImages] = useState<ImageAttachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [hasContent, setHasContent] = useState(false);
   const [showPlaceholder, setShowPlaceholder] = useState(true);
   const [mentionQuery, setMentionQuery] = useState<string | null>(null);
@@ -162,14 +200,18 @@ export function InputBox({
   const editorRef = useRef<HTMLDivElement>(null);
   const mentionRangeRef = useRef<Range | null>(null);
   const dragCounter = useRef(0);
+  const emojiButtonRef = useRef<HTMLButtonElement>(null);
+  const emojiPickerRef = useRef<HTMLDivElement>(null);
+  const savedSelectionRef = useRef<{ node: Node; offset: number } | null>(null);
 
   const updateEditorState = useCallback(() => {
     const el = editorRef.current;
     if (!el) return;
     const text = el.textContent?.trim() || "";
     const hasMentions = el.querySelector("[data-mention-type]") !== null;
-    setHasContent(text.length > 0 || hasMentions);
-    setShowPlaceholder(text.length === 0 && !hasMentions);
+    const hasQuote = el.querySelector("[data-quote-text]") !== null;
+    setHasContent(text.length > 0 || hasMentions || hasQuote);
+    setShowPlaceholder(text.length === 0 && !hasMentions && !hasQuote);
   }, []);
 
   const autoResize = useCallback(() => {
@@ -186,6 +228,39 @@ export function InputBox({
   }, [isStreaming]);
 
   useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
+
+    const existing = el.querySelector("[data-quote-text]");
+    if (quotedText) {
+      if (existing) existing.remove();
+      const pill = createQuotePill(quotedText);
+      el.insertBefore(pill, el.firstChild);
+      const spacer = document.createTextNode("\u00A0");
+      pill.after(spacer);
+      const sel = window.getSelection();
+      if (sel) {
+        const range = document.createRange();
+        range.setStartAfter(spacer);
+        range.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      el.focus();
+      updateEditorState();
+      autoResize();
+    } else if (existing) {
+      const next = existing.nextSibling;
+      if (next?.nodeType === Node.TEXT_NODE && next.textContent === "\u00A0") {
+        next.remove();
+      }
+      existing.remove();
+      updateEditorState();
+      autoResize();
+    }
+  }, [quotedText, updateEditorState, autoResize]);
+
+  useEffect(() => {
     if (!showAttachMenu) return;
     const close = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -197,6 +272,20 @@ export function InputBox({
     });
     return () => document.removeEventListener("click", close);
   }, [showAttachMenu]);
+
+  useEffect(() => {
+    if (!showEmojiPicker) return;
+    const close = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (emojiPickerRef.current?.contains(target)) return;
+      if (emojiButtonRef.current?.contains(target)) return;
+      setShowEmojiPicker(false);
+    };
+    requestAnimationFrame(() => {
+      document.addEventListener("mousedown", close);
+    });
+    return () => document.removeEventListener("mousedown", close);
+  }, [showEmojiPicker]);
 
   useEffect(() => {
     if (pendingDroppedImages?.length) {
@@ -230,12 +319,20 @@ export function InputBox({
     const el = editorRef.current;
     if (!el || isStreaming) return;
 
-    const { text, context } = extractContentFromEditable(el);
+    const { text, context, quoteText } = extractContentFromEditable(el);
     const trimmed = text.trim();
-    if (!trimmed && images.length === 0 && fileAttachments.length === 0 && context.length === 0) return;
+    if (!trimmed && images.length === 0 && fileAttachments.length === 0 && context.length === 0 && !quoteText) return;
+
+    let finalText = trimmed;
+    if (quoteText) {
+      const quoteLine = quoteText.split("\n").map(l => `> ${l}`).join("\n");
+      finalText = trimmed
+        ? `Replying to:\n${quoteLine}\n\n${trimmed}`
+        : `Replying to:\n${quoteLine}`;
+    }
 
     onSend(
-      trimmed,
+      finalText,
       images.length > 0 ? images : undefined,
       context.length > 0 ? { context } : undefined,
       fileAttachments.length > 0 ? fileAttachments : undefined
@@ -246,15 +343,21 @@ export function InputBox({
     setFileAttachments([]);
     setHasContent(false);
     setShowPlaceholder(true);
+    setShowEmojiPicker(false);
     setMentionQuery(null);
     setMentionAnchorRect(null);
     mentionRangeRef.current = null;
+    onClearQuote?.();
     autoResize();
-  }, [isStreaming, images, fileAttachments, onSend, autoResize]);
+  }, [isStreaming, images, fileAttachments, onSend, onClearQuote, autoResize]);
 
   const handleInput = useCallback(() => {
     updateEditorState();
     autoResize();
+
+    if (quotedText && editorRef.current && !editorRef.current.querySelector("[data-quote-text]")) {
+      onClearQuote?.();
+    }
 
     const result = getMentionQueryAtCursor(editorRef.current!);
     if (result) {
@@ -266,7 +369,7 @@ export function InputBox({
       setMentionAnchorRect(null);
       mentionRangeRef.current = null;
     }
-  }, [updateEditorState, autoResize]);
+  }, [updateEditorState, autoResize, quotedText, onClearQuote]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
@@ -287,12 +390,19 @@ export function InputBox({
         e.preventDefault();
         handleSubmit();
       }
-      if (e.key === "Escape" && isStreaming) {
-        e.preventDefault();
-        onStop();
+      if (e.key === "Escape") {
+        if (showEmojiPicker) {
+          e.preventDefault();
+          setShowEmojiPicker(false);
+          return;
+        }
+        if (isStreaming) {
+          e.preventDefault();
+          onStop();
+        }
       }
     },
-    [mentionQuery, handleSubmit, isStreaming, onStop]
+    [mentionQuery, handleSubmit, isStreaming, onStop, showEmojiPicker]
   );
 
   const handleMentionSelect = useCallback(
@@ -335,6 +445,36 @@ export function InputBox({
     setMentionAnchorRect(null);
     mentionRangeRef.current = null;
   }, []);
+
+  const saveSelection = useCallback(() => {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || !editorRef.current?.contains(sel.anchorNode)) return;
+    savedSelectionRef.current = { node: sel.anchorNode!, offset: sel.anchorOffset };
+  }, []);
+
+  const handleEmojiSelect = useCallback((emoji: { native: string }) => {
+    const el = editorRef.current;
+    if (!el) return;
+    el.focus();
+
+    const saved = savedSelectionRef.current;
+    if (saved && el.contains(saved.node)) {
+      const sel = window.getSelection()!;
+      const range = document.createRange();
+      range.setStart(saved.node, saved.offset);
+      range.collapse(true);
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+
+    document.execCommand("insertText", false, emoji.native);
+    const sel = window.getSelection();
+    if (sel && sel.rangeCount > 0 && el.contains(sel.anchorNode)) {
+      savedSelectionRef.current = { node: sel.anchorNode!, offset: sel.anchorOffset };
+    }
+    updateEditorState();
+    autoResize();
+  }, [updateEditorState, autoResize]);
 
   const handlePaste = useCallback(
     (e: ClipboardEvent<HTMLDivElement>) => {
@@ -545,6 +685,31 @@ export function InputBox({
                 </div>
               )}
             </div>
+            <div className="relative flex-shrink-0" data-emoji-picker>
+              <button
+                ref={emojiButtonRef}
+                onClick={() => { saveSelection(); setShowEmojiPicker(v => !v); }}
+                disabled={isStreaming}
+                className="rounded-lg p-1.5 text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 disabled:opacity-30 transition-all"
+                title="Emoji"
+              >
+                <Smile size={18} />
+              </button>
+              {showEmojiPicker && (
+                <div ref={emojiPickerRef} className="absolute bottom-full left-0 mb-2 z-30">
+                  <Suspense fallback={<div className="w-[352px] h-[435px] rounded-xl bg-zinc-900 border border-zinc-700 animate-pulse" />}>
+                    <EmojiPicker
+                      data={emojiData}
+                      onEmojiSelect={handleEmojiSelect}
+                      theme="dark"
+                      previewPosition="none"
+                      skinTonePosition="search"
+                      set="native"
+                    />
+                  </Suspense>
+                </div>
+              )}
+            </div>
             <div className="relative flex-1">
               {showPlaceholder && (
                 <div className="absolute inset-0 text-zinc-500 text-sm leading-relaxed pointer-events-none select-none">
@@ -561,7 +726,7 @@ export function InputBox({
                 onBlur={() => updateEditorState()}
                 role="textbox"
                 aria-placeholder={placeholder}
-                className="min-h-[1.5em] max-h-[200px] overflow-y-auto resize-none bg-transparent text-zinc-100 outline-none text-sm leading-relaxed whitespace-pre-wrap break-words [&_[data-mention-type]]:inline-flex [&_[data-mention-type]]:items-center [&_[data-mention-type]]:gap-1 [&_[data-mention-type]]:rounded [&_[data-mention-type]]:bg-blue-500/20 [&_[data-mention-type]]:text-blue-300 [&_[data-mention-type]]:px-1.5 [&_[data-mention-type]]:py-0.5 [&_[data-mention-type]]:text-xs [&_[data-mention-type]]:font-medium [&_[data-mention-type]]:mx-0.5 [&_[data-mention-type]]:align-baseline [&_[data-mention-type]]:cursor-default [&_[data-mention-type]]:whitespace-nowrap"
+                className="min-h-[1.5em] max-h-[200px] overflow-y-auto resize-none bg-transparent text-zinc-100 outline-none text-sm leading-relaxed whitespace-pre-wrap break-words [&_[data-mention-type]]:inline-flex [&_[data-mention-type]]:items-center [&_[data-mention-type]]:gap-1 [&_[data-mention-type]]:rounded [&_[data-mention-type]]:bg-blue-500/20 [&_[data-mention-type]]:text-blue-300 [&_[data-mention-type]]:px-1.5 [&_[data-mention-type]]:py-0.5 [&_[data-mention-type]]:text-xs [&_[data-mention-type]]:font-medium [&_[data-mention-type]]:mx-0.5 [&_[data-mention-type]]:align-baseline [&_[data-mention-type]]:cursor-default [&_[data-mention-type]]:whitespace-nowrap [&_[data-quote-text]]:inline-flex [&_[data-quote-text]]:items-center [&_[data-quote-text]]:gap-1 [&_[data-quote-text]]:rounded [&_[data-quote-text]]:bg-purple-500/20 [&_[data-quote-text]]:text-purple-300 [&_[data-quote-text]]:px-1.5 [&_[data-quote-text]]:py-0.5 [&_[data-quote-text]]:text-xs [&_[data-quote-text]]:font-medium [&_[data-quote-text]]:mx-0.5 [&_[data-quote-text]]:align-baseline [&_[data-quote-text]]:cursor-default [&_[data-quote-text]]:whitespace-nowrap [&_[data-quote-text]]:max-w-[300px]"
               />
             </div>
             {isStreaming ? (

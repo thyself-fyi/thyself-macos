@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { MessageList } from "./MessageList";
 import { InputBox } from "./InputBox";
 import { SessionSummaryBlock } from "./SessionSummaryBlock";
@@ -9,7 +9,7 @@ import type { PortraitRunStatus } from "./PortraitBuildPanel";
 import { useAutoScroll } from "../hooks/useAutoScroll";
 import type { Message, ImageAttachment, FileAttachment, ContextAttachment } from "../lib/types";
 import { isTauri, invokeCommand } from "../lib/tauriBridge";
-import { ArrowDown, Trash2 } from "lucide-react";
+import { ArrowDown, Trash2, MessageSquareQuote } from "lucide-react";
 
 interface ChatViewProps {
   messages: Message[];
@@ -60,6 +60,10 @@ export function ChatView({
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  const [quotedText, setQuotedText] = useState<string | null>(null);
+  const [replyPill, setReplyPill] = useState<{ text: string; top: number; left: number } | null>(null);
+  const replyPillRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -122,6 +126,70 @@ export function ChatView({
     window.addEventListener("thyself-action", handler);
     return () => window.removeEventListener("thyself-action", handler);
   }, [onSend]);
+
+  // Selection detection for reply pill
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+
+    const handleMouseUp = () => {
+      // Small delay to let the selection finalize
+      requestAnimationFrame(() => {
+        const sel = window.getSelection();
+        if (!sel || sel.isCollapsed || !sel.toString().trim()) {
+          setReplyPill(null);
+          return;
+        }
+
+        const range = sel.getRangeAt(0);
+        const ancestor = range.commonAncestorContainer;
+        const el = ancestor.nodeType === Node.ELEMENT_NODE
+          ? ancestor as HTMLElement
+          : ancestor.parentElement;
+        if (!el?.closest("[data-agent-text]")) {
+          setReplyPill(null);
+          return;
+        }
+
+        const rect = range.getBoundingClientRect();
+        setReplyPill({
+          text: sel.toString(),
+          top: rect.top - 36,
+          left: rect.left + rect.width / 2,
+        });
+      });
+    };
+
+    container.addEventListener("mouseup", handleMouseUp);
+    return () => container.removeEventListener("mouseup", handleMouseUp);
+  }, [containerRef]);
+
+  // Dismiss reply pill on scroll or outside click
+  useEffect(() => {
+    if (!replyPill) return;
+
+    const dismissPill = (e: Event) => {
+      if (replyPillRef.current?.contains(e.target as Node)) return;
+      setReplyPill(null);
+    };
+
+    const container = containerRef.current;
+    container?.addEventListener("scroll", dismissPill);
+    document.addEventListener("mousedown", dismissPill);
+    return () => {
+      container?.removeEventListener("scroll", dismissPill);
+      document.removeEventListener("mousedown", dismissPill);
+    };
+  }, [replyPill, containerRef]);
+
+  const handleReplyClick = useCallback(() => {
+    if (!replyPill) return;
+    setQuotedText(replyPill.text);
+    setReplyPill(null);
+    window.getSelection()?.removeAllRanges();
+  }, [replyPill]);
+
+  const handleClearQuote = useCallback(() => setQuotedText(null), []);
 
   const handleConsumeDroppedImages = useCallback((imgs: ImageAttachment[]) => {
     setPendingImages([]);
@@ -191,6 +259,17 @@ export function ChatView({
       )}
       <div ref={containerRef} className="flex-1 overflow-y-auto relative">
         <MessageList messages={messages} isStreaming={isStreaming} onAction={onSend} onEditMessage={onEditMessage} isReadOnly={isReadOnly} />
+        {replyPill && (
+          <button
+            ref={replyPillRef}
+            onClick={handleReplyClick}
+            className="fixed z-50 flex items-center gap-1.5 rounded-xl bg-zinc-800 border border-zinc-700 shadow-lg px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 transition-colors -translate-x-1/2"
+            style={{ top: replyPill.top, left: replyPill.left }}
+          >
+            <MessageSquareQuote size={12} />
+            Reply
+          </button>
+        )}
       </div>
       {!isAtBottom && messages.length > 0 && (
         <div className="flex justify-center -mt-12 relative z-10">
@@ -217,6 +296,8 @@ export function ChatView({
           onConsumeDroppedFiles={handleConsumeDroppedFiles}
           isTauriDragging={isDraggingOver}
           placeholder={activeSessionKind === "setup" ? "Message thyself..." : undefined}
+          quotedText={quotedText}
+          onClearQuote={handleClearQuote}
         />
       )}
     </div>

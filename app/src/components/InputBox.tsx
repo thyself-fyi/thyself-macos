@@ -591,7 +591,7 @@ export function InputBox({
 
   return (
     <div
-      className="border-t border-zinc-800 bg-zinc-950 p-4"
+      className="relative z-10 border-t border-zinc-800 bg-zinc-950 p-4"
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
       onDragOver={handleDragOver}

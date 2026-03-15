@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { flushSync } from "react-dom";
+import { setChatContext, setUserIdentity } from "./lib/diagnostics";
 import { ChatView } from "./components/ChatView";
 import { SessionSidebar } from "./components/SessionSidebar";
 import { UpdateNotification } from "./components/UpdateNotification";
@@ -8,7 +9,7 @@ import { SubscriptionGate } from "./components/SubscriptionGate";
 import { DataSourceGrid } from "./components/DataSourceGrid";
 import { useStreamChat } from "./hooks/useStreamChat";
 import { invokeCommand } from "./lib/tauriBridge";
-import type { SessionMeta, Message, SystemMessage, Profile, ImageAttachment, FileAttachment, ContextAttachment } from "./lib/types";
+import type { SessionMeta, Message, SystemMessage, Profile, ImageAttachment, FileAttachment, ContextAttachment, UserMessage as UserMessageType } from "./lib/types";
 
 type AppPhase =
   | { kind: "loading" }
@@ -192,6 +193,7 @@ interface MainAppProps {
 
 const OPEN_SETUP_ACTION = "__OPEN_SETUP__";
 const OPEN_PORTRAIT_ACTION = "__OPEN_PORTRAIT__";
+const START_SESSION_ACTION = "__START_SESSION__";
 const WRAP_UP_SESSION_MESSAGE = "Let's wrap up. Please write a session summary of what we covered.";
 const CONTINUE_SETUP_MESSAGE = "I'm ready to continue connecting my data.";
 const PRIVACY_SUBTITLE =
@@ -440,6 +442,20 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     return () => clearInterval(interval);
   }, [activeSessionKind, fetchPortraitStatus, portraitStatus?.status]);
 
+  useEffect(() => {
+    const prev = prevPortraitStatusRef.current;
+    const curr = portraitStatus?.status ?? null;
+    prevPortraitStatusRef.current = curr;
+
+    if (prev === "running" && curr === "completed") {
+      if (activeSessionKind === "portrait" && !isStreamingHere) {
+        sendMessage("Show me who I am.", undefined, { sessionKind: "portrait" });
+      } else {
+        pendingIdentitySummaryRef.current = true;
+      }
+    }
+  }, [portraitStatus?.status, activeSessionKind, isStreamingHere, sendMessage]);
+
   const hasImportedData = useCallback(async (): Promise<boolean> => {
     try {
       const result = await invokeCommand<{ rows?: Array<{ total?: number | string }> }>("query_db", {
@@ -453,6 +469,9 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
   }, []);
 
   const onboardingStarted = useRef(false);
+  const prevPortraitStatusRef = useRef<string | null>(null);
+  const pendingIdentitySummaryRef = useRef(false);
+  const sessionLoadingRef = useRef(false);
 
   useEffect(() => {
     async function resumeActiveSession() {
@@ -527,6 +546,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           (s) => s.status === "active" && (s.kind ?? "conversation") === "conversation"
         );
         if (active) {
+          sessionLoadingRef.current = true;
           setActiveSessionId(active.id);
           setActiveSessionKind((active.kind ?? "conversation") as "conversation" | "setup" | "portrait");
           const full = await invokeCommand<{ session: SessionMeta; summary: string | null }>(
@@ -545,6 +565,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           } else {
             switchToSession(active.id, []);
           }
+          sessionLoadingRef.current = false;
           const ro = full.session.status === "completed";
           sessionMetaCacheRef.current.set(active.id, {
             readOnly: ro, summary: full.summary, name: full.session.name,
@@ -665,7 +686,8 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
       const status = await getSourceConnectionStatus(selectedSources);
       setConnectedSources(status.connected.filter(s => selectedSources.includes(s)));
 
-      if (session.chatHistory && Array.isArray(session.chatHistory) && session.chatHistory.length > 0) {
+      const hasHistory = session.chatHistory && Array.isArray(session.chatHistory) && session.chatHistory.length > 0;
+      if (hasHistory) {
         switchToSession(session.id, session.chatHistory);
       } else {
         const nudge = await makeConversationNudgeMessage(selectedSources, nudgeOpts);
@@ -682,10 +704,19 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
         setIsReadOnly(false);
       }
       refreshSidebar();
+
+      const shouldAutoTrigger = pendingIdentitySummaryRef.current ||
+        (portraitStatus?.status === "completed" && !hasHistory);
+      if (shouldAutoTrigger && !ro) {
+        pendingIdentitySummaryRef.current = false;
+        setTimeout(() => {
+          sendMessage("Show me who I am.", undefined, { sessionKind: "portrait" });
+        }, 300);
+      }
     } catch (err) {
       console.error("Failed to open portrait session:", err);
     }
-  }, [refreshSidebar, selectedSources, switchToSession]);
+  }, [refreshSidebar, selectedSources, switchToSession, portraitStatus?.status, sendMessage]);
 
   const addSourceToProfile = useCallback(
     async (sourceId: string): Promise<string[] | undefined> => {
@@ -736,6 +767,24 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     ) => {
       if (text === OPEN_SETUP_ACTION) {
         await openSetupSession();
+        return;
+      }
+
+      if (text === START_SESSION_ACTION) {
+        try {
+          const session = await invokeCommand<SessionMeta>("create_session", {
+            kind: "conversation",
+          });
+          setActiveSessionId(session.id);
+          setActiveSessionKind("conversation");
+          setSessionName(session.name);
+          setSessionSummary(null);
+          setIsReadOnly(false);
+          switchToSession(session.id, []);
+          refreshSidebar();
+        } catch (err) {
+          console.error("Failed to start conversation session:", err);
+        }
         return;
       }
 
@@ -836,17 +885,48 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     [handleSend]
   );
 
+  const handleEditMessage = useCallback(
+    async (index: number, newContent: string) => {
+      if (isReadOnly) return;
+
+      if (isStreamingHere) {
+        stopStreaming();
+      }
+
+      const original = messages[index];
+      if (!original || original.role !== "user") return;
+      const um = original as UserMessageType;
+
+      setMessages(messages.slice(0, index));
+
+      await sendMessage(newContent, um.images, {
+        sessionKind: activeSessionKind ?? "conversation",
+        context: um.context,
+      }, um.files);
+    },
+    [isReadOnly, isStreamingHere, messages, stopStreaming, setMessages, sendMessage, activeSessionKind]
+  );
+
   // Persist incrementally so refresh/crash during long tool runs
   // (e.g. Gmail import) doesn't lose in-flight chat history.
   // Never save to completed (read-only) sessions.
   useEffect(() => {
-    if (!activeSessionId || isReadOnly) return;
+    if (!activeSessionId || isReadOnly || sessionLoadingRef.current) return;
     const sessionId = activeSessionId;
     const timer = window.setTimeout(() => {
+      if (sessionLoadingRef.current) return;
       void saveCurrentMessages(sessionId, messages);
     }, 400);
     return () => window.clearTimeout(timer);
   }, [activeSessionId, isReadOnly, messages, saveCurrentMessages]);
+
+  useEffect(() => {
+    setChatContext(messages, activeSessionKind ?? "conversation");
+  }, [messages, activeSessionKind]);
+
+  useEffect(() => {
+    setUserIdentity(profile.subject_name, profile.email);
+  }, [profile.subject_name, profile.email]);
 
   // Detect when any session stops streaming — save its messages and
   // refresh UI state if it was the active session.
@@ -1059,6 +1139,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
       const isStale = () => loadRequestRef.current !== requestId;
 
       wrapUpLastShownAtRef.current = 0;
+      sessionLoadingRef.current = true;
 
       // Force React to commit all session-switch state updates to the DOM
       // synchronously so there is zero chance of a stale-content frame.
@@ -1084,7 +1165,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           session: SessionMeta;
           summary: string | null;
         }>("load_session", { sessionId });
-        if (isStale()) return;
+        if (isStale()) { sessionLoadingRef.current = false; return; }
 
         const { session, summary } = result;
         const ro = session.status === "completed";
@@ -1097,6 +1178,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
 
         // If we already showed cached messages, no need to reload them.
         if (getSessionMessages(sessionId).length > 0 || isSessionStreaming(sessionId)) {
+          sessionLoadingRef.current = false;
           return;
         }
 
@@ -1136,12 +1218,22 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           }
         } else {
           switchToSession(session.id, []);
+
+          const loadedKind = (session.kind ?? "conversation") as "conversation" | "setup" | "portrait";
+          if (loadedKind === "portrait" && (pendingIdentitySummaryRef.current || portraitStatus?.status === "completed") && !ro) {
+            pendingIdentitySummaryRef.current = false;
+            setTimeout(() => {
+              sendMessage("Show me who I am.", undefined, { sessionKind: "portrait" });
+            }, 300);
+          }
         }
       } catch (err) {
         console.error("Failed to load session:", err);
+      } finally {
+        sessionLoadingRef.current = false;
       }
     },
-    [switchToSession, getSessionMessages, isSessionStreaming, profile.onboarding_status, selectedSources]
+    [switchToSession, getSessionMessages, isSessionStreaming, profile.onboarding_status, selectedSources, portraitStatus?.status, sendMessage]
   );
 
   return (
@@ -1179,6 +1271,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           onRemoveSource={removeSourceFromProfile}
           portraitStatus={portraitStatus as any}
           onPortraitRefresh={fetchPortraitStatus}
+          onEditMessage={handleEditMessage}
         />
       </div>
     </div>

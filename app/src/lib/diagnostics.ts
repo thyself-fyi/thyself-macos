@@ -174,6 +174,42 @@ async function getSyncStatus(): Promise<Record<string, unknown> | null> {
   }
 }
 
+const WORKER_URL = "https://thyself-feedback.jfru.workers.dev";
+const EPISTEMIC_MARKER = "\n\nYou are the user";
+const _reportedTools = new Set<string>();
+
+export async function sendAutoDiagnostic(
+  toolName: string,
+  toolInput: string,
+  errorContent: string,
+): Promise<void> {
+  if (_reportedTools.has(toolName)) return;
+  _reportedTools.add(toolName);
+
+  try {
+    const diagnostics = await collectDiagnostics();
+    const markerIdx = errorContent.indexOf(EPISTEMIC_MARKER);
+    const cleanError = markerIdx > 0 ? errorContent.slice(0, markerIdx) : errorContent;
+
+    await fetch(WORKER_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "auto-diagnostic",
+        message: `${toolName} failed`,
+        toolName,
+        toolInput,
+        errorContent: cleanError,
+        appVersion: diagnostics.appVersion,
+        os: diagnostics.os,
+        diagnostics,
+      }),
+    });
+  } catch {
+    // auto-diagnostics should never break the app
+  }
+}
+
 export async function collectDiagnostics(): Promise<DiagnosticSnapshot> {
   const [appVersion, syncStatus] = await Promise.all([
     getAppVersion(),

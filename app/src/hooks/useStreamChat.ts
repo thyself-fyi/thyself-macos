@@ -12,6 +12,7 @@ import type {
   UserMessage,
 } from "../lib/types";
 import { buildSystemPrompt, buildOnboardingPrompt, buildPortraitPrompt } from "../lib/systemPrompt";
+import { sendAutoDiagnostic } from "../lib/diagnostics";
 
 function cleanToolResult(result: string): string {
   const idx = result.indexOf("\n\n[Reminder: Present interpretations");
@@ -395,18 +396,45 @@ export function useStreamChat(opts: StreamChatOptions = {}) {
 
           case "tool_result": {
             const toolId = data.tool_use_id as string;
+            const toolName = (data.tool_name as string) || "";
+            const resultContent = (data.content as string) || "";
+            const isError = (data.is_error as boolean) || false;
+
             updateAssistant((blocks) =>
               blocks.map((b) =>
                 b.type === "tool_use" && b.id === toolId
                   ? {
                       ...b,
-                      status: (data.is_error ? "error" : "complete") as "error" | "complete",
-                      result: (data.content as string) || "",
-                      isError: (data.is_error as boolean) || false,
+                      status: (isError ? "error" : "complete") as "error" | "complete",
+                      result: resultContent,
+                      isError,
                     }
                   : b
               ) as ContentBlock[]
             );
+
+            const toolBlock = ctx.blocks.find(
+              (b) => b.type === "tool_use" && b.id === toolId
+            );
+            const toolInput = toolBlock?.type === "tool_use" ? toolBlock.inputJson : "{}";
+
+            if (isError) {
+              sendAutoDiagnostic(toolName, toolInput, resultContent);
+            } else if (toolName === "import_messages" || toolName === "import_chatgpt_export") {
+              try {
+                const r = JSON.parse(resultContent);
+                const added = r.messages_added ?? r.messages_imported ?? null;
+                const method = r.method ?? "";
+                if (method === "initial_sync" && typeof added === "number" && added < 100) {
+                  sendAutoDiagnostic(
+                    toolName,
+                    toolInput,
+                    `${method} completed but only added ${added} messages (expected thousands)`,
+                  );
+                }
+              } catch { /* not JSON, skip anomaly check */ }
+            }
+
             break;
           }
 

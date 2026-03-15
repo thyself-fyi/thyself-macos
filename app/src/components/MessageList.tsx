@@ -13,6 +13,8 @@ interface MessageListProps {
   messages: Message[];
   isStreaming?: boolean;
   onAction?: (message: string) => void;
+  onEditMessage?: (index: number, newContent: string) => void;
+  isReadOnly?: boolean;
 }
 
 function SystemMessageBubble({
@@ -74,7 +76,7 @@ function SystemMessageBubble({
   );
 }
 
-export function MessageList({ messages, isStreaming, onAction }: MessageListProps) {
+export function MessageList({ messages, isStreaming, onAction, onEditMessage, isReadOnly }: MessageListProps) {
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center pt-32">
@@ -122,6 +124,8 @@ export function MessageList({ messages, isStreaming, onAction }: MessageListProp
               files={um.files}
               context={um.context}
               timestamp={um.timestamp}
+              isEditable={!isReadOnly}
+              onEdit={onEditMessage ? (newContent) => onEditMessage(i, newContent) : undefined}
             />
           );
         }

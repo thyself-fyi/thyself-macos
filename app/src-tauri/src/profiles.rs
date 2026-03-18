@@ -164,6 +164,22 @@ pub fn update_profile(
     Ok(updated)
 }
 
+pub fn update_profile_add_source(profile_id: &str, source_id: &str) -> Result<Profile, String> {
+    let mut profiles = read_profiles()?;
+    let profile = profiles
+        .iter_mut()
+        .find(|p| p.id == profile_id)
+        .ok_or_else(|| format!("Profile not found: {}", profile_id))?;
+
+    if !profile.selected_sources.iter().any(|s| s == source_id) {
+        profile.selected_sources.push(source_id.to_string());
+    }
+
+    let updated = profile.clone();
+    write_profiles(&profiles)?;
+    Ok(updated)
+}
+
 pub fn set_backup_password(profile_id: &str, password: &str) -> Result<(), String> {
     let mut profiles = read_profiles()?;
     let profile = profiles

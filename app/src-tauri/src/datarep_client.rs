@@ -1,3 +1,4 @@
+use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -20,6 +21,11 @@ pub enum DatarepResponse {
         #[serde(default = "default_true")]
         retryable: bool,
         context: Option<Value>,
+    },
+    #[serde(rename = "question")]
+    Question {
+        session_id: String,
+        question: String,
     },
 }
 
@@ -44,6 +50,37 @@ pub struct DatarepRecipe {
     pub description: Option<String>,
     #[serde(default)]
     pub times_used: i64,
+}
+
+struct SseEvent {
+    event_type: String,
+    data: String,
+}
+
+fn extract_sse_event(buffer: &mut String) -> Option<SseEvent> {
+    let pos = buffer.find("\n\n")?;
+    let raw = buffer[..pos].to_string();
+    *buffer = buffer[pos + 2..].to_string();
+
+    let mut event_type = String::new();
+    let mut data_parts: Vec<&str> = Vec::new();
+
+    for line in raw.lines() {
+        if let Some(val) = line.strip_prefix("event: ") {
+            event_type = val.trim().to_string();
+        } else if let Some(val) = line.strip_prefix("data: ") {
+            data_parts.push(val);
+        }
+    }
+
+    if event_type.is_empty() && data_parts.is_empty() {
+        return None;
+    }
+
+    Some(SseEvent {
+        event_type,
+        data: data_parts.join("\n"),
+    })
 }
 
 pub struct DatarepClient {
@@ -275,16 +312,176 @@ impl DatarepClient {
         self.parse_response(resp).await
     }
 
-    async fn parse_response(&self, resp: reqwest::Response) -> Result<DatarepResponse, String> {
-        let status = resp.status();
-        let body: Value = resp
-            .json()
+    pub async fn get_streaming(
+        &self,
+        source: &str,
+        query: &str,
+    ) -> Result<DatarepResponse, String> {
+        let resp = self
+            .client
+            .post(format!("{}/get", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "source": source,
+                "query": query,
+                "stream": true
+            }))
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
             .await
-            .map_err(|e| format!("Failed to parse datarep response: {}", e))?;
+            .map_err(|e| format!("datarep /get failed: {}", e))?;
 
+        self.parse_sse_stream(resp).await
+    }
+
+    pub async fn reply(
+        &self,
+        session_id: &str,
+        answer: &str,
+    ) -> Result<DatarepResponse, String> {
+        let resp = self
+            .client
+            .post(format!(
+                "{}/sessions/{}/reply",
+                self.base_url, session_id
+            ))
+            .bearer_auth(&self.api_key)
+            .json(&serde_json::json!({
+                "answer": answer,
+                "stream": true
+            }))
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await
+            .map_err(|e| {
+                format!("datarep /sessions/{}/reply failed: {}", session_id, e)
+            })?;
+
+        if resp.status().as_u16() == 404 {
+            return Err(format!("Session '{}' not found", session_id));
+        }
+
+        self.parse_sse_stream(resp).await
+    }
+
+    pub async fn stream_data(
+        &self,
+        recipe_id: &str,
+    ) -> Result<reqwest::Response, String> {
+        let resp = self
+            .client
+            .get(format!("{}/data/{}", self.base_url, recipe_id))
+            .bearer_auth(&self.api_key)
+            .timeout(std::time::Duration::from_secs(3600))
+            .send()
+            .await
+            .map_err(|e| format!("datarep /data/{} failed: {}", recipe_id, e))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "datarep /data/{} returned {}: {}",
+                recipe_id, status, text
+            ));
+        }
+
+        Ok(resp)
+    }
+
+    pub async fn stream_data_retry(
+        &self,
+        recipe_id: &str,
+    ) -> Result<Option<reqwest::Response>, String> {
+        let resp = self
+            .client
+            .get(format!("{}/data/{}/retry", self.base_url, recipe_id))
+            .bearer_auth(&self.api_key)
+            .timeout(std::time::Duration::from_secs(3600))
+            .send()
+            .await
+            .map_err(|e| {
+                format!("datarep /data/{}/retry failed: {}", recipe_id, e)
+            })?;
+
+        if resp.status().as_u16() == 404 {
+            return Ok(None);
+        }
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(format!(
+                "datarep /data/{}/retry returned {}: {}",
+                recipe_id, status, text
+            ));
+        }
+
+        Ok(Some(resp))
+    }
+
+    async fn parse_sse_stream(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<DatarepResponse, String> {
+        let mut stream = resp.bytes_stream();
+        let mut buffer = String::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| format!("SSE stream error: {}", e))?;
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            while let Some(event) = extract_sse_event(&mut buffer) {
+                match event.event_type.as_str() {
+                    "question" => {
+                        let data: Value =
+                            serde_json::from_str(&event.data).map_err(|e| {
+                                format!("Failed to parse question event: {}", e)
+                            })?;
+                        return Ok(DatarepResponse::Question {
+                            session_id: data["session_id"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                            question: data["question"]
+                                .as_str()
+                                .unwrap_or("")
+                                .to_string(),
+                        });
+                    }
+                    "result" => {
+                        let data: Value =
+                            serde_json::from_str(&event.data).map_err(|e| {
+                                format!("Failed to parse result event: {}", e)
+                            })?;
+                        return self.parse_response_value(&data);
+                    }
+                    _ => continue,
+                }
+            }
+        }
+
+        Err("SSE stream ended without a result or question event".to_string())
+    }
+
+    fn parse_response_value(
+        &self,
+        body: &Value,
+    ) -> Result<DatarepResponse, String> {
         match body.get("status").and_then(|s| s.as_str()) {
             Some("success") => Ok(DatarepResponse::Success {
                 result: body.get("result").cloned().unwrap_or(Value::Null),
+            }),
+            Some("question") => Ok(DatarepResponse::Question {
+                session_id: body["session_id"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
+                question: body["question"]
+                    .as_str()
+                    .unwrap_or("")
+                    .to_string(),
             }),
             Some("action_required") => Ok(DatarepResponse::ActionRequired {
                 action_type: body["action_type"]
@@ -308,21 +505,43 @@ impl DatarepClient {
                 retryable: body["retryable"].as_bool().unwrap_or(true),
                 context: body.get("context").cloned(),
             }),
-            _ => {
-                if status.is_success() {
-                    Ok(DatarepResponse::Success {
-                        result: body,
-                    })
-                } else {
-                    Err(format!(
-                        "datarep error ({}): {}",
-                        status,
-                        body.get("detail")
-                            .and_then(|d| d.as_str())
-                            .unwrap_or(&body.to_string())
-                    ))
-                }
-            }
+            Some("error") => Err(format!(
+                "datarep error: {}",
+                body.get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("unknown")
+            )),
+            _ => Ok(DatarepResponse::Success {
+                result: body.clone(),
+            }),
+        }
+    }
+
+    async fn parse_response(
+        &self,
+        resp: reqwest::Response,
+    ) -> Result<DatarepResponse, String> {
+        let status = resp.status();
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse datarep response: {}", e))?;
+
+        let result = self.parse_response_value(&body);
+        if result.is_ok() {
+            return result;
+        }
+
+        if status.is_success() {
+            Ok(DatarepResponse::Success { result: body })
+        } else {
+            Err(format!(
+                "datarep error ({}): {}",
+                status,
+                body.get("detail")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or(&body.to_string())
+            ))
         }
     }
 }

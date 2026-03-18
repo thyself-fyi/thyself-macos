@@ -28,6 +28,8 @@ function fileToImageAttachment(file: File): Promise<ImageAttachment | null> {
   });
 }
 
+type EditDropResult = { images: ImageAttachment[]; files: Array<{ type: "file" | "folder"; path: string; name: string }> };
+
 interface UserMessageProps {
   content: string;
   images?: ImageAttachment[];
@@ -36,11 +38,14 @@ interface UserMessageProps {
   timestamp: number;
   onEdit?: (newContent: string, images?: ImageAttachment[], files?: FileAttachment[]) => void;
   isEditable?: boolean;
+  registerEditDropTarget?: (cb: (result: EditDropResult) => void) => void;
+  unregisterEditDropTarget?: () => void;
+  isTauriDragging?: boolean;
 }
 
 const COLLAPSED_MAX = 88;
 
-export function UserMessage({ content, images, files, context, timestamp, onEdit, isEditable }: UserMessageProps) {
+export function UserMessage({ content, images, files, context, timestamp, onEdit, isEditable, registerEditDropTarget, unregisterEditDropTarget, isTauriDragging }: UserMessageProps) {
   const [expanded, setExpanded] = useState(false);
   const [needsTruncation, setNeedsTruncation] = useState(false);
   const [lightboxSrc, setLightboxSrc] = useState<string | null>(null);
@@ -91,6 +96,15 @@ export function UserMessage({ content, images, files, context, timestamp, onEdit
       ta.style.height = ta.scrollHeight + "px";
     }
   }, []);
+
+  useEffect(() => {
+    if (!isEditing || !registerEditDropTarget || !unregisterEditDropTarget) return;
+    registerEditDropTarget((result) => {
+      if (result.images.length) setEditImages((prev) => [...prev, ...result.images]);
+      if (result.files.length) setEditFiles((prev) => [...prev, ...result.files]);
+    });
+    return () => unregisterEditDropTarget();
+  }, [isEditing, registerEditDropTarget, unregisterEditDropTarget]);
 
   useEffect(() => {
     if (!showAttachMenu) return;
@@ -294,7 +308,7 @@ export function UserMessage({ content, images, files, context, timestamp, onEdit
       <div className="sticky top-0 z-10 bg-zinc-950 px-4 pt-4 pb-2">
         <div
           ref={cardRef}
-          className={`group relative max-w-3xl mx-auto rounded-xl border ${isEditing ? `border-zinc-600 ${isDragging ? "border-blue-500 bg-blue-500/5" : ""}` : "border-zinc-800"} bg-zinc-900/60 px-4 pt-3 pb-4 ${!isEditing ? "overflow-hidden" : ""} ${!isEditing && (isEditable || needsTruncation) ? "cursor-pointer" : ""}`}
+          className={`group relative max-w-3xl mx-auto rounded-xl border ${isEditing ? `border-zinc-600 ${(isDragging || isTauriDragging) ? "border-blue-500 bg-blue-500/5" : ""}` : "border-zinc-800"} bg-zinc-900/60 px-4 pt-3 pb-4 ${!isEditing ? "overflow-hidden" : ""} ${!isEditing && (isEditable || needsTruncation) ? "cursor-pointer" : ""}`}
           style={isCollapsed ? { maxHeight: COLLAPSED_MAX } : undefined}
           onClick={() => {
             if (isEditing) return;
@@ -313,7 +327,7 @@ export function UserMessage({ content, images, files, context, timestamp, onEdit
         >
           {isEditing ? (
             <>
-              {isDragging && (
+              {(isDragging || isTauriDragging) && (
                 <div className="absolute inset-0 z-10 flex items-center justify-center rounded-xl bg-blue-500/10 pointer-events-none">
                   <div className="flex items-center gap-2 text-sm text-blue-400 font-medium">
                     <Paperclip size={18} />

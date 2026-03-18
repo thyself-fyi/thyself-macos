@@ -62,6 +62,8 @@ export function ChatView({
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
   const [pendingFiles, setPendingFiles] = useState<FileAttachment[]>([]);
   const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const editDropTargetRef = useRef<((result: { images: ImageAttachment[]; files: Array<{ type: "file" | "folder"; path: string; name: string }> }) => void) | null>(null);
+  const [hasEditDropTarget, setHasEditDropTarget] = useState(false);
 
   const [quotedText, setQuotedText] = useState<string | null>(null);
   const [replyPill, setReplyPill] = useState<{ text: string; top: number; left: number } | null>(null);
@@ -93,6 +95,12 @@ export function ChatView({
               images: ImageAttachment[];
               files: Array<{ type: "file" | "folder"; path: string; name: string }>;
             }>("read_dropped_files", { paths });
+
+            const editTarget = editDropTargetRef.current;
+            if (editTarget) {
+              editTarget(result);
+              return;
+            }
 
             if (result.images.length) {
               setPendingImages((prev) => [...prev, ...result.images]);
@@ -260,7 +268,16 @@ export function ChatView({
         />
       )}
       <div ref={containerRef} className="flex-1 min-h-0 overflow-y-auto relative">
-        <MessageList messages={messages} isStreaming={isStreaming} onAction={onSend} onEditMessage={onEditMessage} isReadOnly={isReadOnly} />
+        <MessageList
+          messages={messages}
+          isStreaming={isStreaming}
+          onAction={onSend}
+          onEditMessage={onEditMessage}
+          isReadOnly={isReadOnly}
+          registerEditDropTarget={(cb) => { editDropTargetRef.current = cb; setHasEditDropTarget(true); }}
+          unregisterEditDropTarget={() => { editDropTargetRef.current = null; setHasEditDropTarget(false); }}
+          isTauriDragging={hasEditDropTarget && isDraggingOver}
+        />
         {replyPill && (
           <button
             ref={replyPillRef}

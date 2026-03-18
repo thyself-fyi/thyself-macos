@@ -619,16 +619,18 @@ export function InputBox({
               {images.map((img, idx) => (
                 <div
                   key={`img-${idx}`}
-                  className="group/thumb relative h-16 w-16 rounded-lg overflow-hidden border border-zinc-700 bg-zinc-800 flex-shrink-0"
+                  className="group/thumb relative h-16 w-16 flex-shrink-0"
                 >
-                  <img
-                    src={`data:${img.mediaType};base64,${img.data}`}
-                    alt={img.name}
-                    className="h-full w-full object-cover"
-                  />
+                  <div className="h-full w-full rounded-lg overflow-hidden border border-zinc-700 bg-zinc-800">
+                    <img
+                      src={`data:${img.mediaType};base64,${img.data}`}
+                      alt={img.name}
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
                   <button
                     onClick={() => removeImage(idx)}
-                    className="absolute -top-1 -right-1 rounded-full bg-zinc-900 border border-zinc-600 p-0.5 opacity-0 group-hover/thumb:opacity-100 transition-opacity hover:bg-zinc-700"
+                    className="absolute -top-1.5 -right-1.5 rounded-full bg-zinc-900 border border-zinc-600 p-0.5 opacity-0 group-hover/thumb:opacity-100 transition-opacity hover:bg-zinc-700"
                   >
                     <X size={10} className="text-zinc-300" />
                   </button>

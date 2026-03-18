@@ -11,12 +11,17 @@ import type {
 import { UserMessage } from "./UserMessage";
 import { AgentResponse } from "./AgentResponse";
 
+type EditDropResult = { images: ImageAttachment[]; files: Array<{ type: "file" | "folder"; path: string; name: string }> };
+
 interface MessageListProps {
   messages: Message[];
   isStreaming?: boolean;
   onAction?: (message: string) => void;
   onEditMessage?: (index: number, newContent: string, images?: ImageAttachment[], files?: FileAttachment[]) => void;
   isReadOnly?: boolean;
+  registerEditDropTarget?: (cb: (result: EditDropResult) => void) => void;
+  unregisterEditDropTarget?: () => void;
+  isTauriDragging?: boolean;
 }
 
 function SystemMessageBubble({
@@ -78,7 +83,7 @@ function SystemMessageBubble({
   );
 }
 
-export function MessageList({ messages, isStreaming, onAction, onEditMessage, isReadOnly }: MessageListProps) {
+export function MessageList({ messages, isStreaming, onAction, onEditMessage, isReadOnly, registerEditDropTarget, unregisterEditDropTarget, isTauriDragging }: MessageListProps) {
   if (messages.length === 0) {
     return (
       <div className="flex flex-1 items-center justify-center pt-32">
@@ -133,6 +138,9 @@ export function MessageList({ messages, isStreaming, onAction, onEditMessage, is
               timestamp={um.timestamp}
               isEditable={!isReadOnly}
               onEdit={onEditMessage ? (newContent, images, files) => onEditMessage(i, newContent, images, files) : undefined}
+              registerEditDropTarget={registerEditDropTarget}
+              unregisterEditDropTarget={unregisterEditDropTarget}
+              isTauriDragging={isTauriDragging}
             />
           );
         }

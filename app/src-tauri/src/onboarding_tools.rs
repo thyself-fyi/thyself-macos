@@ -337,19 +337,20 @@ async fn auto_start_datarep() -> bool {
     // for agent-driven operations (recipe creation during onboarding).
     // The user's JWT acts as the API key; the proxy validates it and
     // forwards to Anthropic with the real key.
-    let mut start_cmd = build_datarep_command(&resolved, &["start"]);
+    let mut start_cmd = build_datarep_command(&resolved, &["start", "--daemon"]);
     if let Some(auth_token) = profiles::get_active_auth_token() {
         start_cmd
             .env("ANTHROPIC_BASE_URL", "https://thyself-api.jfru.workers.dev")
             .env("ANTHROPIC_API_KEY", &auth_token);
     }
 
-    let spawn_result = start_cmd
+    let start_result = start_cmd
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
+        .status()
+        .await;
 
-    if spawn_result.is_err() {
+    if start_result.is_err() {
         return false;
     }
 
@@ -411,13 +412,21 @@ async fn setup_datarep() -> Result<Value, String> {
     let resolved = resolve_datarep(false).await
         .ok_or("datarep is not installed. Call check_datarep first.")?;
 
-    // Stop any running server first so the CLI writes to a quiescent database
+    // Stop any running server — try the CLI command first, then force-kill on port
     let _ = build_datarep_command(&resolved, &["stop"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // Force-kill anything still on port 7080 (the CLI stop relies on a PID file
+    // which may not exist if the server was spawned without --daemon)
+    let _ = tokio::process::Command::new("sh")
+        .args(["-c", "lsof -ti :7080 | xargs kill -9 2>/dev/null"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     let output = build_datarep_command(
             &resolved,

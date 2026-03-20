@@ -104,9 +104,9 @@ export function SyncStatusIndicator() {
           const labels: Record<string, string> = {
             gmail: "Gmail",
             imessage: "iMessage",
-            whatsapp_desktop: "WhatsApp US",
-            whatsapp_web: "WhatsApp UK",
-            whatsapp: "WhatsApp US",
+            whatsapp_desktop: "WhatsApp (Desktop)",
+            whatsapp_web: "WhatsApp (Web)",
+            whatsapp: "WhatsApp (Desktop)",
             apple_mail: "Apple Mail",
             apple_mail_v1: "Apple Mail",
           };

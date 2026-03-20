@@ -706,8 +706,8 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     async (sourceId: string, selectedSourcesOverride?: string[]) => {
       const sourceLabels: Record<string, string> = {
         imessage: "iMessage",
-        whatsapp: "WhatsApp US (Desktop)",
-        whatsapp_web: "WhatsApp UK (Web)",
+        whatsapp: "WhatsApp (Desktop)",
+        whatsapp_web: "WhatsApp (Web)",
         gmail: "Gmail",
         chatgpt: "ChatGPT",
       };

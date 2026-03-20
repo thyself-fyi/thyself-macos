@@ -10,8 +10,8 @@ export function formatSourceLabels(sources: string[]): string {
   return sources
     .map((s) => {
       if (s === "imessage") return "iMessage";
-      if (s === "whatsapp") return "WhatsApp US";
-      if (s === "whatsapp_web") return "WhatsApp UK";
+      if (s === "whatsapp") return "WhatsApp (Desktop)";
+      if (s === "whatsapp_web") return "WhatsApp (Web)";
       if (s === "gmail") return "Gmail";
       if (s === "chatgpt") return "ChatGPT";
       if (s === "email_cantab" || s === "apple_mail") return "Apple Mail";

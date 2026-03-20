@@ -56,6 +56,7 @@ jobs:
             --hidden-import datarep.seed_recipes \
             --add-data "$DATAREP_PKG/seed_recipes:datarep/seed_recipes" \
             --collect-submodules datarep \
+            --codesign-identity "-" \
             -p "$(python -c "import site; print(site.getsitepackages()[0])")" \
             -c "$DATAREP_PKG/__main__.py"
           mkdir -p app/src-tauri/bin

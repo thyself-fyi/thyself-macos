@@ -26,6 +26,7 @@ app/src-tauri/bin/
 
 # Workers
 workers/*/node_modules/
+workers/*/.wrangler/
 app/dist/
 app/src-tauri/target/
 app/src-tauri/gen/

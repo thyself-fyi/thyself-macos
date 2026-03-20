@@ -31,12 +31,12 @@ const KNOWN_SOURCES: Record<
 > = {
   imessage: { name: "iMessage", icon: MessageCircle, syncKeys: ["imessage"] },
   whatsapp: {
-    name: "WhatsApp US",
+    name: "WhatsApp (Desktop)",
     icon: MessageSquareText,
     syncKeys: ["whatsapp_desktop", "whatsapp"],
   },
   whatsapp_web: {
-    name: "WhatsApp UK",
+    name: "WhatsApp (Web)",
     icon: MessageSquareText,
     syncKeys: ["whatsapp_web"],
   },

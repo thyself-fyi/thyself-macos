@@ -58,7 +58,7 @@ interface FeedbackRequest {
 }
 
 const REPO = "thyself-fyi/thyself-feedback";
-const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_MAX = 30;
 const RATE_LIMIT_WINDOW_SECONDS = 3600;
 
 const corsHeaders = {

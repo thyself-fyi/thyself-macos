@@ -400,6 +400,14 @@ async fn setup_datarep() -> Result<Value, String> {
     let resolved = resolve_datarep(false).await
         .ok_or("datarep is not installed. Call check_datarep first.")?;
 
+    // Stop any running server first so the CLI writes to a quiescent database
+    let _ = build_datarep_command(&resolved, &["stop"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     let output = build_datarep_command(
             &resolved,
             &["app", "register", "thyself", "--sources", "imessage,whatsapp,gmail,chatgpt"],
@@ -435,6 +443,11 @@ async fn setup_datarep() -> Result<Value, String> {
 
     if let Some(profile_id) = profiles::get_active_profile_id() {
         profiles::set_datarep_api_key(&profile_id, &api_key)?;
+    }
+
+    // Restart the server so it picks up the new app registration
+    if !auto_start_datarep().await {
+        eprintln!("[datarep] Warning: server restart after app registration failed");
     }
 
     Ok(json!({

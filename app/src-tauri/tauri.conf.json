@@ -36,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "externalBin": [
+      "bin/datarep"
+    ],
     "resources": {
       "../../config.py": "",
       "../../extract_whatsapp.py": "",

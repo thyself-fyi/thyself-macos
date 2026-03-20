@@ -42,6 +42,32 @@ jobs:
 
           echo "Build version: $NEW_VERSION"
 
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build datarep sidecar binary
+        run: |
+          pip install pyinstaller
+          pip install datarep
+          DATAREP_PKG=$(python -c "import datarep; import os; print(os.path.dirname(datarep.__file__))")
+          pyinstaller --onefile --name datarep \
+            --hidden-import datarep.seed_recipes \
+            --add-data "$DATAREP_PKG/seed_recipes:datarep/seed_recipes" \
+            --collect-submodules datarep \
+            -p "$(python -c "import site; print(site.getsitepackages()[0])")" \
+            -c "$DATAREP_PKG/__main__.py"
+          mkdir -p app/src-tauri/bin
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "arm64" ]; then
+            TARGET="aarch64-apple-darwin"
+          else
+            TARGET="x86_64-apple-darwin"
+          fi
+          cp dist/datarep "app/src-tauri/bin/datarep-$TARGET"
+          echo "Built datarep sidecar for $TARGET ($(du -h dist/datarep | cut -f1))"
+
       - name: Setup Node
         uses: actions/setup-node@v4
         with:

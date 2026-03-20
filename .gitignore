@@ -22,6 +22,7 @@ local_tests/
 
 # Tauri app
 app/node_modules/
+app/src-tauri/bin/
 
 # Workers
 workers/*/node_modules/

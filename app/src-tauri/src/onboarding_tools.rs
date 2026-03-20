@@ -263,10 +263,19 @@ async fn datarep_health_check() -> bool {
 }
 
 /// Returns (program, base_args) for invoking datarep.
-/// Tries: 1) `datarep` on PATH  2) `python3 -m datarep`
-/// If neither works and auto_install is true, runs `python3 -m pip install datarep`
-/// and retries.
-async fn resolve_datarep(auto_install: bool) -> Option<(String, Vec<String>)> {
+/// Tries: 1) bundled sidecar binary  2) `datarep` on PATH  3) `python3 -m datarep`
+async fn resolve_datarep(_auto_install: bool) -> Option<(String, Vec<String>)> {
+    // Try bundled sidecar binary next to main executable
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sidecar = dir.join("datarep");
+            if sidecar.exists() {
+                eprintln!("[datarep] Using bundled sidecar at {}", sidecar.display());
+                return Some((sidecar.to_string_lossy().to_string(), vec![]));
+            }
+        }
+    }
+
     // Try `datarep` on PATH
     if let Ok(status) = tokio::process::Command::new("datarep")
         .arg("--help")
@@ -291,38 +300,6 @@ async fn resolve_datarep(auto_install: bool) -> Option<(String, Vec<String>)> {
         if status.success() {
             return Some(("python3".to_string(), vec!["-m".to_string(), "datarep".to_string()]));
         }
-    }
-
-    if !auto_install {
-        return None;
-    }
-
-    // Auto-install datarep via pip
-    eprintln!("[datarep] Not found, installing via pip...");
-    let install = tokio::process::Command::new("python3")
-        .args(["-m", "pip", "install", "--user", "-q", "datarep"])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .status()
-        .await;
-
-    if install.map(|s| s.success()).unwrap_or(false) {
-        eprintln!("[datarep] pip install succeeded");
-        // After pip install --user, the script goes to ~/Library/Python/3.x/bin/datarep
-        // which may not be on PATH, so use python3 -m datarep
-        if let Ok(status) = tokio::process::Command::new("python3")
-            .args(["-m", "datarep", "--help"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-        {
-            if status.success() {
-                return Some(("python3".to_string(), vec!["-m".to_string(), "datarep".to_string()]));
-            }
-        }
-    } else {
-        eprintln!("[datarep] pip install failed");
     }
 
     None

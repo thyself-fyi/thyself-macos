@@ -176,13 +176,12 @@ pub async fn cmd_remove_data_source(
         }));
     }
 
-    match source_id.as_str() {
-        "imessage" => onboarding_tools::kill_sync_for_source("imessage"),
-        "whatsapp" => onboarding_tools::kill_syncs_for_sources(&["whatsapp_desktop", "whatsapp_web"]),
-        "gmail" => onboarding_tools::kill_sync_for_source("gmail"),
-        "chatgpt" => onboarding_tools::kill_sync_for_source("chatgpt"),
-        _ => {}
-    }
+    onboarding_tools::kill_sync_for_source(&source_id);
+
+    let connector = profile.source_metadata
+        .get(&source_id)
+        .map(|m| m.connector.as_str())
+        .unwrap_or(source_id.as_str());
 
     let guard = state.conn.lock().map_err(|e| e.to_string())?;
     let conn = guard
@@ -199,39 +198,14 @@ pub async fn cmd_remove_data_source(
     let mut deleted_chatgpt_conversations = 0usize;
     let mut deleted_sync_runs = 0usize;
 
-    match source_id.as_str() {
-        "imessage" => {
-            deleted_messages = tx
-                .execute("DELETE FROM messages WHERE source = 'imessage'", [])
-                .map_err(|e| format!("Failed deleting iMessage messages: {}", e))?;
-            deleted_conversations = tx
-                .execute("DELETE FROM conversations WHERE source = 'imessage'", [])
-                .map_err(|e| format!("Failed deleting iMessage conversations: {}", e))?;
-            deleted_sync_runs = tx
-                .execute("DELETE FROM sync_runs WHERE source = 'imessage'", [])
-                .map_err(|e| format!("Failed deleting iMessage sync runs: {}", e))?;
-        }
-        "whatsapp" => {
-            deleted_messages = tx
-                .execute("DELETE FROM messages WHERE source = 'whatsapp'", [])
-                .map_err(|e| format!("Failed deleting WhatsApp messages: {}", e))?;
-            deleted_conversations = tx
-                .execute("DELETE FROM conversations WHERE source = 'whatsapp'", [])
-                .map_err(|e| format!("Failed deleting WhatsApp conversations: {}", e))?;
-            deleted_sync_runs = tx
-                .execute(
-                    "DELETE FROM sync_runs WHERE source IN ('whatsapp_desktop', 'whatsapp_web')",
-                    [],
-                )
-                .map_err(|e| format!("Failed deleting WhatsApp sync runs: {}", e))?;
-        }
-        "gmail" => {
+    match connector {
+        "gmail" | "apple_mail" => {
             deleted_gmail = tx
                 .execute("DELETE FROM gmail_messages", [])
-                .map_err(|e| format!("Failed deleting Gmail messages: {}", e))?;
+                .map_err(|e| format!("Failed deleting email messages: {}", e))?;
             deleted_sync_runs = tx
-                .execute("DELETE FROM sync_runs WHERE source = 'gmail'", [])
-                .map_err(|e| format!("Failed deleting Gmail sync runs: {}", e))?;
+                .execute("DELETE FROM sync_runs WHERE source = ?1", [&source_id])
+                .map_err(|e| format!("Failed deleting sync runs: {}", e))?;
         }
         "chatgpt" => {
             deleted_chatgpt_messages = tx
@@ -241,10 +215,20 @@ pub async fn cmd_remove_data_source(
                 .execute("DELETE FROM chatgpt_conversations", [])
                 .map_err(|e| format!("Failed deleting ChatGPT conversations: {}", e))?;
             deleted_sync_runs = tx
-                .execute("DELETE FROM sync_runs WHERE source = 'chatgpt'", [])
-                .map_err(|e| format!("Failed deleting ChatGPT sync runs: {}", e))?;
+                .execute("DELETE FROM sync_runs WHERE source = ?1", [&source_id])
+                .map_err(|e| format!("Failed deleting sync runs: {}", e))?;
         }
-        _ => return Err(format!("Unsupported source_id: {}", source_id)),
+        _ => {
+            deleted_messages = tx
+                .execute("DELETE FROM messages WHERE source = ?1", [&source_id])
+                .map_err(|e| format!("Failed deleting messages: {}", e))?;
+            deleted_conversations = tx
+                .execute("DELETE FROM conversations WHERE source = ?1", [&source_id])
+                .map_err(|e| format!("Failed deleting conversations: {}", e))?;
+            deleted_sync_runs = tx
+                .execute("DELETE FROM sync_runs WHERE source = ?1", [&source_id])
+                .map_err(|e| format!("Failed deleting sync runs: {}", e))?;
+        }
     }
 
     // Clean up dependent rows after conversation deletions.

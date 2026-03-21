@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { invokeCommand } from "../lib/tauriBridge";
-import type { SyncRun, SyncStatus } from "../lib/types";
+import type { SourceMeta, SyncRun, SyncStatus } from "../lib/types";
 import {
   BrainCircuit,
   ChevronDown,
@@ -16,6 +16,7 @@ import type { LucideIcon } from "lucide-react";
 
 interface SetupSourcesStatusPanelProps {
   selectedSources: string[];
+  sourceMetadata?: Record<string, SourceMeta>;
   connectedSources?: string[];
   onAddSourceMessage?: () => void;
   onRequestSourceSetup?: (
@@ -25,46 +26,33 @@ interface SetupSourcesStatusPanelProps {
   onRemoveSource?: (sourceId: string) => void | Promise<void>;
 }
 
-const KNOWN_SOURCES: Record<
-  string,
-  { name: string; icon: LucideIcon; syncKeys: string[] }
-> = {
-  imessage: { name: "iMessage", icon: MessageCircle, syncKeys: ["imessage"] },
-  whatsapp: {
-    name: "WhatsApp",
-    icon: MessageSquareText,
-    syncKeys: ["whatsapp_desktop", "whatsapp"],
-  },
-  whatsapp_web: {
-    name: "WhatsApp (Web)",
-    icon: MessageSquareText,
-    syncKeys: ["whatsapp_web"],
-  },
-  gmail: { name: "Gmail", icon: Mail, syncKeys: ["gmail"] },
-  chatgpt: { name: "ChatGPT", icon: BrainCircuit, syncKeys: ["chatgpt"] },
-  email_cantab: {
-    name: "Cantab email",
-    icon: Mail,
-    syncKeys: ["apple_mail", "apple_mail_v1"],
-  },
-  apple_mail: {
-    name: "Apple Mail",
-    icon: Mail,
-    syncKeys: ["apple_mail", "apple_mail_v1"],
-  },
+const CONNECTOR_ICONS: Record<string, LucideIcon> = {
+  imessage: MessageCircle,
+  whatsapp_web: MessageSquareText,
+  whatsapp_desktop: MessageSquareText,
+  whatsapp: MessageSquareText,
+  gmail: Mail,
+  apple_mail: Mail,
+  chatgpt: BrainCircuit,
 };
 
-function sourceDisplayName(id: string): string {
-  if (KNOWN_SOURCES[id]) return KNOWN_SOURCES[id].name;
-  return id.charAt(0).toUpperCase() + id.slice(1);
+function sourceDisplayName(id: string, meta?: Record<string, SourceMeta>): string {
+  if (meta?.[id]?.label) return meta[id].label;
+  const fallback: Record<string, string> = {
+    imessage: "iMessage",
+    gmail: "Gmail",
+    chatgpt: "ChatGPT",
+  };
+  return fallback[id] || id.charAt(0).toUpperCase() + id.slice(1).replace(/_/g, " ");
 }
 
-function sourceIcon(id: string): LucideIcon {
-  return KNOWN_SOURCES[id]?.icon ?? Database;
+function sourceIcon(id: string, meta?: Record<string, SourceMeta>): LucideIcon {
+  const connector = meta?.[id]?.connector || id;
+  return CONNECTOR_ICONS[connector] ?? Database;
 }
 
 function sourceSyncKeys(id: string): string[] {
-  return KNOWN_SOURCES[id]?.syncKeys ?? [id];
+  return [id];
 }
 
 function chooseLatestRun(runs: SyncRun[]): SyncRun | null {
@@ -94,6 +82,7 @@ function statusLabel(
 
 export function SetupSourcesStatusPanel({
   selectedSources,
+  sourceMetadata,
   connectedSources,
   onAddSourceMessage,
   onRequestSourceSetup,
@@ -129,7 +118,7 @@ export function SetupSourcesStatusPanel({
   }, []);
 
   const sourceToConfirmName = confirmRemoveSourceId
-    ? sourceDisplayName(confirmRemoveSourceId)
+    ? sourceDisplayName(confirmRemoveSourceId, sourceMetadata)
     : null;
 
   const [expanded, setExpanded] = useState(false);
@@ -194,7 +183,7 @@ export function SetupSourcesStatusPanel({
           )}
           <div className="flex items-center gap-1.5 min-w-0">
             {selectedSources.map((sourceId) => {
-              const Icon = sourceIcon(sourceId);
+              const Icon = sourceIcon(sourceId, sourceMetadata);
               return (
                 <Icon
                   key={sourceId}
@@ -238,8 +227,8 @@ export function SetupSourcesStatusPanel({
         {expanded && (
           <div className="mt-2 grid grid-cols-2 gap-2">
             {selectedSources.map((sourceId, idx) => {
-              const Icon = sourceIcon(sourceId);
-              const name = sourceDisplayName(sourceId);
+              const Icon = sourceIcon(sourceId, sourceMetadata);
+              const name = sourceDisplayName(sourceId, sourceMetadata);
               const status = sourceStatuses[idx];
               const syncKeys = sourceSyncKeys(sourceId);
               const runs = syncKeys

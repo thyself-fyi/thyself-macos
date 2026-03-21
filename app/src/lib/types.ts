@@ -118,6 +118,11 @@ export interface StreamEvent {
   };
 }
 
+export interface SourceMeta {
+  label: string;
+  connector: string;
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -127,6 +132,7 @@ export interface Profile {
   subject_name: string;
   email: string | null;
   selected_sources: string[];
+  source_metadata?: Record<string, SourceMeta>;
   onboarding_status: "pending" | "ingesting" | "extracting" | "complete";
   subscription_status?: "none" | "active" | "past_due" | "cancelled";
   createdAt: string;

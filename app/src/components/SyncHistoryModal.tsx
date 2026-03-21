@@ -8,15 +8,9 @@ interface SyncHistoryModalProps {
   manualSyncBusy: boolean;
 }
 
-const SOURCE_META: Record<string, string> = {
-  gmail: "Gmail",
-  imessage: "iMessage",
-  whatsapp_desktop: "WhatsApp Desktop",
-  whatsapp_web: "WhatsApp Web",
-  chatgpt: "ChatGPT",
-  apple_mail: "Apple Mail",
-  apple_mail_v1: "Apple Mail",
-};
+function formatSourceName(source: string): string {
+  return source.charAt(0).toUpperCase() + source.slice(1).replace(/_/g, " ");
+}
 
 function formatDate(iso: string | null): string {
   if (!iso) return "—";
@@ -167,7 +161,7 @@ export function SyncHistoryModal({
                   </thead>
                   <tbody>
                     {history.map((run, i) => {
-                      const label = SOURCE_META[run.source] || run.source;
+                      const label = formatSourceName(run.source);
                       return (
                         <tr
                           key={run.id ?? i}

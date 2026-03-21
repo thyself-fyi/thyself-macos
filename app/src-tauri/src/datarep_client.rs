@@ -215,6 +215,37 @@ impl DatarepClient {
         }
     }
 
+    pub async fn register_source_json(&self, body: &Value) -> Result<Value, String> {
+        let resp = self
+            .client
+            .post(format!("{}/sources", self.base_url))
+            .bearer_auth(&self.api_key)
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("datarep source registration failed: {}", e))?;
+
+        let status = resp.status();
+        let resp_body: Value = resp
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse register_source response: {}", e))?;
+
+        if status.is_success() || status.as_u16() == 409 {
+            Ok(resp_body)
+        } else {
+            let detail = resp_body.get("detail").and_then(|d| d.as_str()).unwrap_or("unknown error");
+            if status.as_u16() == 400 && detail.contains("UNIQUE constraint") {
+                Ok(resp_body)
+            } else {
+                Err(format!(
+                    "datarep source registration failed ({}): {}",
+                    status, detail
+                ))
+            }
+        }
+    }
+
     pub async fn initiate_oauth(&self, source: &str) -> Result<Value, String> {
         let resp = self
             .client

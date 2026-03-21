@@ -235,15 +235,21 @@ fn add_data_source(tool_input: &Value) -> Result<Value, String> {
     let source_id = tool_input["source_id"]
         .as_str()
         .ok_or("Missing 'source_id' parameter")?;
+    let label = tool_input["label"].as_str();
+    let connector = tool_input["connector"].as_str();
 
     let profile_id = profiles::get_active_profile_id()
         .ok_or_else(|| "No active profile".to_string())?;
 
-    let profile = profiles::update_profile_add_source(&profile_id, source_id)?;
+    let profile = profiles::update_profile_add_source(&profile_id, source_id, label, connector)?;
+
+    let meta = profile.source_metadata.get(source_id);
 
     Ok(json!({
         "status": "added",
         "source_id": source_id,
+        "label": meta.map(|m| m.label.as_str()).unwrap_or(source_id),
+        "connector": meta.map(|m| m.connector.as_str()).unwrap_or(source_id),
         "selected_sources": profile.selected_sources,
     }))
 }
@@ -423,7 +429,7 @@ async fn setup_datarep() -> Result<Value, String> {
         .post("http://127.0.0.1:7080/admin/register-app")
         .json(&serde_json::json!({
             "name": "thyself",
-            "allowed_sources": ["imessage", "whatsapp", "gmail", "chatgpt"]
+            "allowed_sources": null
         }))
         .send()
         .await
@@ -475,7 +481,7 @@ async fn setup_datarep_via_cli() -> Result<Value, String> {
 
     let output = build_datarep_command(
             &resolved,
-            &["app", "register", "thyself", "--sources", "imessage,whatsapp,gmail,chatgpt"],
+            &["app", "register", "thyself"],
         )
         .output()
         .await
@@ -528,13 +534,27 @@ async fn register_datarep_source(tool_input: &Value) -> Result<Value, String> {
     let source_type = tool_input["source_type"]
         .as_str()
         .unwrap_or("discovered");
+    let connector = tool_input["connector"].as_str();
+    let label = tool_input["label"].as_str();
     let config = tool_input
         .get("config")
         .cloned()
         .unwrap_or(json!({}));
 
+    let mut body = json!({
+        "name": name,
+        "source_type": source_type,
+        "config": config,
+    });
+    if let Some(c) = connector {
+        body["connector"] = json!(c);
+    }
+    if let Some(l) = label {
+        body["label"] = json!(l);
+    }
+
     let client = DatarepClient::from_profile()?;
-    let result = client.register_source(name, source_type, config.clone()).await;
+    let result = client.register_source_json(&body).await;
 
     match result {
         Ok(val) => Ok(val),
@@ -542,7 +562,7 @@ async fn register_datarep_source(tool_input: &Value) -> Result<Value, String> {
             eprintln!("[datarep] register_source got 401, re-registering app and retrying...");
             setup_datarep().await?;
             let client = DatarepClient::from_profile()?;
-            client.register_source(name, source_type, config).await.map_err(|e2| {
+            client.register_source_json(&body).await.map_err(|e2| {
                 format!("datarep source registration failed after re-registration: {}", e2)
             })
         }
@@ -671,8 +691,9 @@ async fn datarep_import(tool_input: &Value) -> Result<Value, String> {
                 };
                 let data_dir = profiles::get_active_data_dir();
                 let db_path = data_dir.join("thyself.db");
+                let conn_hint = connector_for_source(source);
                 let import_result =
-                    crate::loader::load_messages_from_json(&db_path, &json_lines, source)?;
+                    crate::loader::load_messages_from_json(&db_path, &json_lines, source, conn_hint.as_deref())?;
                 ensure_sync_installed();
                 Ok(json!({
                     "status": "ok",
@@ -768,6 +789,16 @@ async fn datarep_stream(tool_input: &Value) -> Result<Value, String> {
     do_stream_and_load(&client, &rid, source_label, source_id).await
 }
 
+fn connector_for_source(source: &str) -> Option<String> {
+    profiles::get_active_profile_id()
+        .and_then(|_| profiles::read_profiles().ok())
+        .and_then(|profiles| {
+            let pid = profiles::get_active_profile_id()?;
+            profiles.into_iter().find(|p| p.id == pid)
+        })
+        .and_then(|p| p.source_metadata.get(source).map(|m| m.connector.clone()))
+}
+
 async fn do_stream_and_load(
     client: &DatarepClient,
     recipe_id: &str,
@@ -776,10 +807,8 @@ async fn do_stream_and_load(
 ) -> Result<Value, String> {
     use futures::StreamExt;
 
-    let source_key = match source {
-        "whatsapp_desktop" | "whatsapp_backup" => "whatsapp",
-        other => other,
-    };
+    let source_key = source;
+    let connector = connector_for_source(source);
 
     let data_dir = profiles::get_active_data_dir();
     let db_path = data_dir.join("thyself.db");
@@ -836,7 +865,7 @@ async fn do_stream_and_load(
 
     let json_text = all_lines.join("\n");
     let import_result =
-        crate::loader::load_messages_from_json(&db_path, &json_text, source)?;
+        crate::loader::load_messages_from_json(&db_path, &json_text, source, connector.as_deref())?;
 
     let count_after = rusqlite::Connection::open(&db_path)
         .ok()
@@ -932,6 +961,7 @@ async fn do_stream_and_load(
                         &db_path,
                         &retry_text,
                         source,
+                        connector.as_deref(),
                     );
                 }
             }
@@ -1282,20 +1312,24 @@ pub fn get_onboarding_tool_definitions() -> Vec<Value> {
         // --- UI tools ---
         json!({
             "name": "add_data_source",
-            "description": "Add a data source to the user's profile so it appears as a card in the UI. Call this for each source the user mentions when you ask where they communicate. The source_id should be a lowercase identifier (e.g. 'imessage', 'whatsapp', 'gmail', 'chatgpt', 'slack', 'discord', 'telegram'). The card will appear in the setup panel immediately.",
+            "description": "Add a data source (account) to the user's profile. Each source_id is a unique lowercase slug for this account. For services with multiple accounts, use descriptive slugs like 'whatsapp_personal', 'gmail_work'. The label is the human-readable display name. The connector is the extraction method (e.g. 'whatsapp_web', 'apple_mail', 'gmail', 'imessage').",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "source_id": {
                         "type": "string",
-                        "description": "Lowercase identifier for the source (e.g. 'imessage', 'whatsapp', 'gmail', 'slack')"
+                        "description": "Unique lowercase slug for this account (e.g. 'imessage', 'whatsapp_personal', 'gmail_work', 'email_cantab')"
                     },
-                    "display_name": {
+                    "label": {
                         "type": "string",
-                        "description": "Optional human-readable name (e.g. 'iMessage', 'WhatsApp'). If omitted, derived from source_id."
+                        "description": "Human-readable display name (e.g. 'Personal WhatsApp', 'Work Gmail', 'Cantab Email'). Shown in the UI."
+                    },
+                    "connector": {
+                        "type": "string",
+                        "description": "Extraction method: 'imessage', 'whatsapp_web', 'whatsapp_desktop', 'gmail', 'chatgpt', 'apple_mail'. Determines which recipe to use."
                     }
                 },
-                "required": ["source_id"]
+                "required": ["source_id", "label", "connector"]
             }
         }),
         // --- data connection tools ---
@@ -1319,21 +1353,29 @@ pub fn get_onboarding_tool_definitions() -> Vec<Value> {
         }),
         json!({
             "name": "register_datarep_source",
-            "description": "Register a data source by name. Paths and configuration are discovered automatically. Must be called before scanning or importing that source.",
+            "description": "Register a data source with the data connector. Must be called before scanning or importing. The name is the account slug (same as source_id from add_data_source). Pass connector to link this account to the right extraction recipe.",
             "input_schema": {
                 "type": "object",
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Source name (e.g. 'imessage', 'whatsapp', 'gmail', 'chatgpt', 'slack')"
+                        "description": "Account slug — same as source_id from add_data_source (e.g. 'imessage', 'whatsapp_personal', 'gmail_work')"
                     },
                     "source_type": {
                         "type": "string",
-                        "description": "Optional type hint: 'local_db', 'rest_api', 'local_files'. Omit for auto-detection."
+                        "description": "Optional type hint: 'local_db', 'rest_api', 'local_files', 'discovered'. Omit for auto-detection."
+                    },
+                    "connector": {
+                        "type": "string",
+                        "description": "Extraction method (e.g. 'whatsapp_web', 'apple_mail', 'gmail'). Links this account to the right recipe."
+                    },
+                    "label": {
+                        "type": "string",
+                        "description": "Optional human-readable name for this account."
                     },
                     "config": {
                         "type": "object",
-                        "description": "Optional source-specific configuration. Usually not needed — paths are discovered automatically."
+                        "description": "Optional source-specific configuration."
                     }
                 },
                 "required": ["name"]

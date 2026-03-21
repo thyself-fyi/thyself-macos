@@ -111,7 +111,7 @@ export interface StreamChatOptions {
   activeSessionKind?: "conversation" | "setup" | "portrait" | null;
   portraitStatus?: { status: string; phase?: string; results_summary?: string | null } | null;
   onSessionCompleted?: (sessionId: string) => void;
-  onSourceAdded?: (sourceId: string) => void;
+  onSourceAdded?: (sourceId: string, label?: string, connector?: string) => void;
 }
 
 interface SendMessageOptions {
@@ -429,7 +429,7 @@ export function useStreamChat(opts: StreamChatOptions = {}) {
               try {
                 const r = JSON.parse(cleanToolResult(resultContent));
                 if (r.source_id) {
-                  optsRef.current.onSourceAdded?.(r.source_id);
+                  optsRef.current.onSourceAdded?.(r.source_id, r.label, r.connector);
                 }
               } catch { /* ignore */ }
             }

@@ -101,16 +101,7 @@ export function SyncStatusIndicator() {
       latest
         .filter((r) => r.status === "failed")
         .map((r) => {
-          const labels: Record<string, string> = {
-            gmail: "Gmail",
-            imessage: "iMessage",
-            whatsapp_desktop: "WhatsApp (Desktop)",
-            whatsapp_web: "WhatsApp (Web)",
-            whatsapp: "WhatsApp",
-            apple_mail: "Apple Mail",
-            apple_mail_v1: "Apple Mail",
-          };
-          return labels[r.source] || r.source;
+          return r.source.charAt(0).toUpperCase() + r.source.slice(1).replace(/_/g, " ");
         })
     )
   );

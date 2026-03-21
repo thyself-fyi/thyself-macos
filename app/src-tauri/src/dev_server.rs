@@ -805,13 +805,12 @@ async fn handle_remove_data_source(
         }
     };
 
-    match body.source_id.as_str() {
-        "imessage" => onboarding_tools::kill_sync_for_source("imessage"),
-        "whatsapp" => onboarding_tools::kill_syncs_for_sources(&["whatsapp_desktop", "whatsapp_web"]),
-        "gmail" => onboarding_tools::kill_sync_for_source("gmail"),
-        "chatgpt" => onboarding_tools::kill_sync_for_source("chatgpt"),
-        _ => {}
-    }
+    onboarding_tools::kill_sync_for_source(&body.source_id);
+
+    let connector = profile.source_metadata
+        .get(&body.source_id)
+        .map(|m| m.connector.clone())
+        .unwrap_or_else(|| body.source_id.clone());
 
     let guard = state.db.conn.lock().unwrap();
     let conn = match guard.as_ref() {
@@ -842,54 +841,24 @@ async fn handle_remove_data_source(
         "sync_runs": 0
     });
 
-    let result = match body.source_id.as_str() {
-        "imessage" => {
-            let m = tx.execute("DELETE FROM messages WHERE source = 'imessage'", []);
-            let c = tx.execute("DELETE FROM conversations WHERE source = 'imessage'", []);
-            let s = tx.execute("DELETE FROM sync_runs WHERE source = 'imessage'", []);
-            match (m, c, s) {
-                (Ok(mm), Ok(cc), Ok(ss)) => {
-                    deleted["messages"] = json!(mm);
-                    deleted["conversations"] = json!(cc);
-                    deleted["sync_runs"] = json!(ss);
-                    Ok(())
-                }
-                _ => Err("Failed deleting iMessage data".to_string()),
-            }
-        }
-        "whatsapp" => {
-            let m = tx.execute("DELETE FROM messages WHERE source = 'whatsapp'", []);
-            let c = tx.execute("DELETE FROM conversations WHERE source = 'whatsapp'", []);
-            let s = tx.execute(
-                "DELETE FROM sync_runs WHERE source IN ('whatsapp_desktop', 'whatsapp_web')",
-                [],
-            );
-            match (m, c, s) {
-                (Ok(mm), Ok(cc), Ok(ss)) => {
-                    deleted["messages"] = json!(mm);
-                    deleted["conversations"] = json!(cc);
-                    deleted["sync_runs"] = json!(ss);
-                    Ok(())
-                }
-                _ => Err("Failed deleting WhatsApp data".to_string()),
-            }
-        }
-        "gmail" => {
+    let source_id = &body.source_id;
+    let result = match connector.as_str() {
+        "gmail" | "apple_mail" => {
             let g = tx.execute("DELETE FROM gmail_messages", []);
-            let s = tx.execute("DELETE FROM sync_runs WHERE source = 'gmail'", []);
+            let s = tx.execute("DELETE FROM sync_runs WHERE source = ?1", [source_id.as_str()]);
             match (g, s) {
                 (Ok(gg), Ok(ss)) => {
                     deleted["gmail_messages"] = json!(gg);
                     deleted["sync_runs"] = json!(ss);
                     Ok(())
                 }
-                _ => Err("Failed deleting Gmail data".to_string()),
+                _ => Err("Failed deleting email data".to_string()),
             }
         }
         "chatgpt" => {
             let m = tx.execute("DELETE FROM chatgpt_messages", []);
             let c = tx.execute("DELETE FROM chatgpt_conversations", []);
-            let s = tx.execute("DELETE FROM sync_runs WHERE source = 'chatgpt'", []);
+            let s = tx.execute("DELETE FROM sync_runs WHERE source = ?1", [source_id.as_str()]);
             match (m, c, s) {
                 (Ok(mm), Ok(cc), Ok(ss)) => {
                     deleted["chatgpt_messages"] = json!(mm);
@@ -900,7 +869,20 @@ async fn handle_remove_data_source(
                 _ => Err("Failed deleting ChatGPT data".to_string()),
             }
         }
-        _ => Err(format!("Unsupported source_id: {}", body.source_id)),
+        _ => {
+            let m = tx.execute("DELETE FROM messages WHERE source = ?1", [source_id.as_str()]);
+            let c = tx.execute("DELETE FROM conversations WHERE source = ?1", [source_id.as_str()]);
+            let s = tx.execute("DELETE FROM sync_runs WHERE source = ?1", [source_id.as_str()]);
+            match (m, c, s) {
+                (Ok(mm), Ok(cc), Ok(ss)) => {
+                    deleted["messages"] = json!(mm);
+                    deleted["conversations"] = json!(cc);
+                    deleted["sync_runs"] = json!(ss);
+                    Ok(())
+                }
+                _ => Err("Failed deleting data".to_string()),
+            }
+        }
     };
 
     if let Err(e) = result {

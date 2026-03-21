@@ -5,35 +5,40 @@ export interface ConversationPromptContext {
   turnCount?: number;
 }
 
-/** Display labels for connected source ids (imessage → iMessage, etc.). */
-export function formatSourceLabels(sources: string[]): string {
+/** Display labels for connected source ids using profile metadata or fallback. */
+export function formatSourceLabels(sources: string[], metadata?: Record<string, { label: string; connector: string }>): string {
   return sources
     .map((s) => {
-      if (s === "imessage") return "iMessage";
-      if (s === "whatsapp") return "WhatsApp (Desktop)";
-      if (s === "whatsapp_web") return "WhatsApp (Web)";
-      if (s === "gmail") return "Gmail";
-      if (s === "chatgpt") return "ChatGPT";
-      if (s === "email_cantab" || s === "apple_mail") return "Apple Mail";
-      return s;
+      if (metadata?.[s]?.label) return metadata[s].label;
+      const fallback: Record<string, string> = {
+        imessage: "iMessage",
+        gmail: "Gmail",
+        chatgpt: "ChatGPT",
+      };
+      return fallback[s] || s.charAt(0).toUpperCase() + s.slice(1).replace(/_/g, " ");
     })
     .join(", ");
 }
 
 /** Raw message table docs for SQL sources present in `connectedSources` (portrait flows). */
-function buildConnectedRawTableBullets(connectedSources: string[]): string {
+function buildConnectedRawTableBullets(connectedSources: string[], metadata?: Record<string, { label: string; connector: string }>): string {
+  const connectors = new Set(
+    connectedSources.map((s) => metadata?.[s]?.connector || s)
+  );
   const lines: string[] = [];
-  if (connectedSources.includes("imessage") || connectedSources.includes("whatsapp")) {
+  const hasMessages = connectors.has("imessage") ||
+    [...connectors].some((c) => c.startsWith("whatsapp"));
+  if (hasMessages) {
     lines.push(
       "- `messages` — iMessage/WhatsApp. Columns: content, sent_at, is_from_me, contact_id, source, conversation_id"
     );
   }
-  if (connectedSources.includes("chatgpt")) {
+  if (connectors.has("chatgpt")) {
     lines.push(
       "- `chatgpt_messages` — ChatGPT. Columns: text, role, conversation_id, create_time (unix epoch)"
     );
   }
-  if (connectedSources.includes("gmail")) {
+  if (connectors.has("gmail") || connectors.has("apple_mail")) {
     lines.push(
       "- `gmail_messages` — Email. Columns: body_text, subject, from_addr, from_name, sent_at, is_from_me"
     );
@@ -293,26 +298,27 @@ export interface PortraitStatusForPrompt {
 export function buildPortraitPrompt(
   subjectName: string,
   connectedSources: string[],
-  portraitStatus?: PortraitStatusForPrompt | null
+  portraitStatus?: PortraitStatusForPrompt | null,
+  metadata?: Record<string, { label: string; connector: string }>
 ): string {
-  const sourceNames = formatSourceLabels(connectedSources);
+  const sourceNames = formatSourceLabels(connectedSources, metadata);
 
-  const tableMap: Record<string, { table: string; countCol: string; dateCol: string; contentCol: string }> = {
+  const connectorTableMap: Record<string, { table: string; countCol: string; dateCol: string; contentCol: string }> = {
     imessage: { table: "messages", countCol: "id", dateCol: "sent_at", contentCol: "content" },
-    whatsapp: { table: "messages", countCol: "id", dateCol: "sent_at", contentCol: "content" },
+    whatsapp_web: { table: "messages", countCol: "id", dateCol: "sent_at", contentCol: "content" },
+    whatsapp_desktop: { table: "messages", countCol: "id", dateCol: "sent_at", contentCol: "content" },
     gmail: { table: "gmail_messages", countCol: "id", dateCol: "sent_at", contentCol: "body_text" },
+    apple_mail: { table: "gmail_messages", countCol: "id", dateCol: "sent_at", contentCol: "body_text" },
     chatgpt: { table: "chatgpt_messages", countCol: "id", dateCol: "datetime(create_time, 'unixepoch')", contentCol: "text" },
   };
 
   const queries = connectedSources.map((s) => {
-    const info = tableMap[s];
+    const connector = metadata?.[s]?.connector || s;
+    const info = connectorTableMap[connector];
     if (!info) return null;
     const cols = `'${s}' as source, COUNT(${info.countCol}) as msg_count, COALESCE(SUM(LENGTH(${info.contentCol})), 0) as total_chars, MIN(${info.dateCol}) as earliest, MAX(${info.dateCol}) as latest`;
-    if (s === "imessage") {
-      return `SELECT ${cols} FROM ${info.table} WHERE source = 'imessage'`;
-    }
-    if (s === "whatsapp") {
-      return `SELECT ${cols} FROM ${info.table} WHERE source LIKE 'whatsapp%'`;
+    if (info.table === "messages") {
+      return `SELECT ${cols} FROM ${info.table} WHERE source = '${s}'`;
     }
     return `SELECT ${cols} FROM ${info.table}`;
   }).filter(Boolean);
@@ -321,7 +327,7 @@ export function buildPortraitPrompt(
 
   const estimateQuery = `SELECT total_msgs, total_chars, api_tokens_m, est_cost, CASE WHEN est_minutes >= 60 AND est_minutes % 60 > 0 THEN (est_minutes / 60) || 'h ' || (est_minutes % 60) || 'm' WHEN est_minutes >= 60 THEN (est_minutes / 60) || 'h' ELSE est_minutes || ' minutes' END as est_time FROM (SELECT total_msgs, total_chars, (est_tokens * 8 / 5 + 500000) / 1000000 as api_tokens_m, ((ext_batches * 4 + syn_calls * 5 + 4) / 5) * 5 as est_minutes, (ext_batches * 150 + syn_calls * 150 + 49) / 50 * 5 as est_cost FROM (SELECT *, CASE WHEN syn_raw > 1 THEN syn_raw + 1 ELSE 1 END as syn_calls FROM (SELECT *, MAX(1, (ext_batches * 20000 + 899999) / 900000) as syn_raw FROM (SELECT *, (est_tokens + 549999) / 550000 as ext_batches FROM (SELECT SUM(msg_count) as total_msgs, SUM(total_chars) as total_chars, (SUM(total_chars) + SUM(msg_count) * 70) / 4 as est_tokens FROM (${statsQuery}))))))`;
 
-  const dbTables = buildConnectedRawTableBullets(connectedSources);
+  const dbTables = buildConnectedRawTableBullets(connectedSources, metadata);
 
   if (portraitStatus?.status === "running") {
     return `## Role
@@ -454,9 +460,9 @@ When they ask to build:
 ${dbTables}`;
 }
 
-export function buildOnboardingPrompt(subjectName: string, selectedSources: string[]): string {
+export function buildOnboardingPrompt(subjectName: string, selectedSources: string[], metadata?: Record<string, { label: string; connector: string }>): string {
   const hasSources = selectedSources.length > 0;
-  const sourceList = formatSourceLabels(selectedSources);
+  const sourceList = formatSourceLabels(selectedSources, metadata);
 
   return `## Role
 
@@ -466,7 +472,36 @@ ${hasSources ? `${subjectName} already selected: ${sourceList}.` : `${subjectNam
 
 ## Task — connect sources
 
-${hasSources ? `Skip source discovery; go to **Initialize connector**.` : `Ask where they communicate (e.g. iMessage, WhatsApp, email, ChatGPT). On answer, call \`add_data_source\` for each id in parallel using lowercase names: "imessage", "whatsapp", "gmail", "chatgpt", "slack", etc. If they add another source later, \`add_data_source\` for it.`}
+${hasSources ? `${subjectName} already started connecting sources. Continue from where they left off — check connector status and proceed.` : `Ask where they communicate (e.g. iMessage, WhatsApp, email, ChatGPT).`}
+
+### Account model — ALWAYS follow
+
+Each data source is an **account** with three parts:
+- **source_id** — unique slug (e.g. \`imessage\`, \`whatsapp_personal\`, \`gmail_work\`, \`email_cantab\`)
+- **label** — display name the user chose (e.g. "Personal WhatsApp", "Work Gmail")
+- **connector** — extraction method (see Connector reference below)
+
+**Before adding any source**, ask ${subjectName} what they want to call it — e.g. "What should I call this account? Something like 'Personal WhatsApp' or 'UK WhatsApp'?" If they only have one account for a service, a simple label like "iMessage" or "Gmail" is fine — but still confirm.
+
+If a user has **multiple accounts** for the same service (e.g. two WhatsApp accounts, three email accounts), create separate sources for each with distinct slugs, labels, and appropriate connectors.
+
+When calling \`add_data_source\`, always pass all three: \`source_id\`, \`label\`, and \`connector\`.
+When calling \`register_datarep_source\`, pass the same \`name\` (= source_id), plus \`connector\` and \`label\`.
+
+### Connector reference
+
+Each connector is a method for extracting data. **Do not guess** what connectors can or cannot do — rely only on this list:
+
+| Connector | What it does |
+|---|---|
+| \`imessage\` | Reads the local iMessage/SMS database (requires Full Disk Access) |
+| \`whatsapp_web\` | **Automates Safari to extract messages from the WhatsApp Web interface.** The user must be logged into web.whatsapp.com in Safari. Datarep navigates the chats and extracts message content via browser automation — it does NOT read cookies or WebSockets. This works and is a supported connector. |
+| \`whatsapp_desktop\` | Reads a local WhatsApp Desktop or iPhone backup database file |
+| \`gmail\` | Uses Gmail OAuth to read email via Google's API |
+| \`apple_mail\` | Reads the local Apple Mail database (macOS Mail.app data) |
+| \`chatgpt\` | **Automates Safari to extract conversations from chat.openai.com.** Similar to whatsapp_web — browser automation, not cookies. |
+
+**Never tell the user a connector "can't access" data if it's listed above.** If a scan or import fails, relay the actual error — don't speculate about technical limitations.
 
 ### How connection works
 
@@ -483,13 +518,13 @@ Thyself's connector discovers paths, handles auth, and asks questions when neede
 ## Tools
 
 ### Source management
-- **add_data_source** — Adds a card in the UI.
+- **add_data_source** — Adds a card in the UI. Pass source_id, label, connector.
 
 ### Connector
 - **check_datarep** — Call first.
 - **setup_datarep** — If status is \`needs_registration\`.
-- **register_datarep_source** — Per source name.
-- **datarep_scan** — Counts and date ranges (array of sources).
+- **register_datarep_source** — Per account. Pass name (= source_id), connector, label.
+- **datarep_scan** — Counts and date ranges (array of source names).
 - **datarep_import** — Start import; may return questions.
 - **datarep_reply** — Answer a connector question (\`session_id\` + answer).
 - **datarep_stream** — After success, stream into the DB.
@@ -510,15 +545,15 @@ If \`datarep_reply\` returns \`{"status": "session_completed"}\`, the connector 
 ## Procedure
 
 1. **Initialize connector** — \`check_datarep\`. If \`needs_registration\`, \`setup_datarep\`. If \`not_running\`, retry once; if still down, suggest \`restart_app\` (no terminal instructions).
-2. **Register + scan** — \`register_datarep_source\` for each source (parallel). Then \`datarep_scan\`.
+2. **Register + scan** — \`register_datarep_source\` for each account (parallel). Then \`datarep_scan\`.
    - \`found\` → ok.
    - \`question\` → relay / \`datarep_reply\`.
    - \`permission_denied\` → \`open_full_disk_access\`, user toggles Thyself ON, rescan; if still bad, \`restart_app\`.
    - Safari automation error (WhatsApp Web, ChatGPT) → \`open_automation_settings\`, user enables Safari for Thyself/python3, rescan.
    - \`action_required\` → relay, wait, retry.
    - If they say they granted access: **rescan immediately** without a lecture.
-3. **Import** — Per source, \`datarep_import\`; handle question loop; on success, \`datarep_stream\`. Report messages loaded, conversations/contacts, date range.
-4. **Final summary** — Totals per source, date spans, conversation/contact counts. Close with: "Your message history is now loaded! Thyself will use this data to understand your life patterns, relationships, and growth. You're all set."
+3. **Import** — Per account, \`datarep_import\`; handle question loop; on success, \`datarep_stream\`. Report messages loaded, conversations/contacts, date range.
+4. **Final summary** — Totals per account, date spans, conversation/contact counts. Close with: "Your message history is now loaded! Thyself will use this data to understand your life patterns, relationships, and growth. You're all set."
 
 ## Errors
 

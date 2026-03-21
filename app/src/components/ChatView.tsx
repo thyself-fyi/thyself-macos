@@ -23,6 +23,7 @@ interface ChatViewProps {
   isReadOnly?: boolean;
   activeSessionKind?: "conversation" | "setup" | "portrait" | null;
   selectedSources?: string[];
+  sourceMetadata?: Record<string, import("../lib/types").SourceMeta>;
   connectedSources?: string[];
   onAddSourceMessage?: () => void;
   onRequestSourceSetup?: (
@@ -47,6 +48,7 @@ export function ChatView({
   isReadOnly,
   activeSessionKind,
   selectedSources = [],
+  sourceMetadata,
   connectedSources,
   onAddSourceMessage,
   onRequestSourceSetup,
@@ -255,6 +257,7 @@ export function ChatView({
       {activeSessionKind === "setup" && (
         <SetupSourcesStatusPanel
           selectedSources={selectedSources}
+          sourceMetadata={sourceMetadata}
           connectedSources={connectedSources}
           onAddSourceMessage={onAddSourceMessage}
           onRequestSourceSetup={onRequestSourceSetup}

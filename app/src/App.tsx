@@ -192,17 +192,6 @@ const PRIVACY_SUBTITLE =
 const PRIVACY_LEARN_MORE =
   "When you use the app, relevant messages are sent to our AI provider for processing. They do not use your data for training and delete it within 30 days. We're working on zero-day deletion so nothing is kept at all.";
 
-const SOURCE_SYNC_KEYS: Record<string, string[]> = {
-  imessage: ["imessage"],
-  whatsapp: ["whatsapp_desktop", "whatsapp"],
-  whatsapp_web: ["whatsapp_web"],
-  gmail: ["gmail"],
-  chatgpt: ["chatgpt"],
-  /** Profile source IDs from add_data_source — datarep stores sync_runs as apple_mail */
-  email_cantab: ["apple_mail", "apple_mail_v1"],
-  apple_mail: ["apple_mail", "apple_mail_v1"],
-};
-
 async function getConnectedSources(sources: string[]): Promise<string[]> {
   try {
     const status = await invokeCommand<{
@@ -211,24 +200,18 @@ async function getConnectedSources(sources: string[]): Promise<string[]> {
     const latest = status.latest_by_source ?? {};
 
     const connected = sources.filter((source) => {
-      const keys = SOURCE_SYNC_KEYS[source] ?? [source];
-      return keys.some((k) => latest[k] && latest[k].status === "completed");
+      return latest[source] && latest[source].status === "completed";
     });
 
-    // For sources without a direct sync_run match, check if there are
-    // unclaimed completed sync_runs (data imported under a different
-    // datarep source name, e.g. "apple_mail" for profile source "email_cantab").
+    // For sources without a direct match, check if there's an unclaimed
+    // completed sync run (handles legacy data where sync_runs.source was
+    // a different name, e.g. "apple_mail" for profile source "email_cantab").
     const unmatched = sources.filter((s) => !connected.includes(s));
     if (unmatched.length > 0) {
-      const claimedKeys = new Set(
-        sources.flatMap((s) => SOURCE_SYNC_KEYS[s] ?? [s])
-      );
+      const claimedKeys = new Set(sources);
       const unclaimedCompleted = Object.entries(latest).filter(
         ([k, v]) => !claimedKeys.has(k) && v.status === "completed"
       );
-      // Only pair when there is exactly one unmatched profile source and at least
-      // one completed run with no claimed key (avoids marking everyone connected
-      // when counts don't line up).
       if (unmatched.length === 1 && unclaimedCompleted.length >= 1) {
         connected.push(unmatched[0]);
       }
@@ -271,6 +254,7 @@ const LAST_SESSION_KEY = "thyself_last_session_id";
 
 function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: MainAppProps) {
   const [selectedSources, setSelectedSources] = useState<string[]>(profile.selected_sources);
+  const [sourceMetadata, setSourceMetadata] = useState<Record<string, import("./lib/types").SourceMeta>>(profile.source_metadata ?? {});
   const [connectedSources, setConnectedSources] = useState<string[]>([]);
   const [activeSessionKind, setActiveSessionKind] = useState<"conversation" | "setup" | "portrait" | null>(null);
   const [portraitStatus, setPortraitStatus] = useState<{
@@ -317,11 +301,20 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
     }
   }, [refreshSidebar]);
 
-  const handleSourceAdded = useCallback((sourceId: string) => {
+  const handleSourceAdded = useCallback((sourceId: string, label?: string, connector?: string) => {
     setSelectedSources((prev) => {
       if (prev.includes(sourceId)) return prev;
       return [...prev, sourceId];
     });
+    if (label || connector) {
+      setSourceMetadata((prev) => ({
+        ...prev,
+        [sourceId]: {
+          label: label || sourceId,
+          connector: connector || sourceId,
+        },
+      }));
+    }
   }, []);
 
   const { messages, streamingSessionIds, sendMessage, stopStreaming, clearMessages, setMessages, switchToSession, getSessionMessages, isSessionStreaming } =
@@ -704,19 +697,13 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
 
   const requestSourceSetup = useCallback(
     async (sourceId: string, selectedSourcesOverride?: string[]) => {
-      const sourceLabels: Record<string, string> = {
-        imessage: "iMessage",
-        whatsapp: "WhatsApp (Desktop)",
-        whatsapp_web: "WhatsApp (Web)",
-        gmail: "Gmail",
-        chatgpt: "ChatGPT",
-      };
-      const label = sourceLabels[sourceId] || sourceId;
+      const meta = sourceMetadata[sourceId];
+      const label = meta?.label || sourceId;
       await handleSend(`Help me connect my ${label} data source.`, undefined, {
         selectedSourcesOverride,
       });
     },
-    [handleSend]
+    [handleSend, sourceMetadata]
   );
 
   const handleEditMessage = useCallback(
@@ -1025,6 +1012,7 @@ function MainApp({ profile, onProfileSwitch, onNewProfile, onDeleteProfile }: Ma
           isReadOnly={isReadOnly}
           activeSessionKind={activeSessionKind}
           selectedSources={selectedSources}
+          sourceMetadata={sourceMetadata}
           connectedSources={connectedSources}
           onAddSourceMessage={() => handleSend("I want to add a new data source.")}
           onRequestSourceSetup={requestSourceSetup}

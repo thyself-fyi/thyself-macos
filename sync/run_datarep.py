@@ -54,11 +54,6 @@ PROFILE_SOURCE_TO_DATAREP = {
 }
 
 DATAREP_SOURCE_TO_DB = {
-    "imessage": "imessage",
-    "whatsapp_desktop": "whatsapp",
-    "whatsapp_web": "whatsapp",
-    "gmail": "gmail",
-    "chatgpt": "chatgpt",
     "apple_mail": "apple_mail_v1",
 }
 

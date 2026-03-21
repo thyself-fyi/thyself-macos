@@ -1,7 +1,14 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SourceMeta {
+    pub label: String,
+    pub connector: String,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Profile {
@@ -13,6 +20,8 @@ pub struct Profile {
     pub subject_name: String,
     pub email: Option<String>,
     pub selected_sources: Vec<String>,
+    #[serde(default)]
+    pub source_metadata: HashMap<String, SourceMeta>,
     pub onboarding_status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_password: Option<String>,
@@ -99,6 +108,7 @@ pub fn create_profile(
         subject_name,
         email,
         selected_sources,
+        source_metadata: HashMap::new(),
         onboarding_status: "pending".to_string(),
         backup_password: None,
         auth_token: None,
@@ -144,6 +154,7 @@ pub fn update_profile(
         profile.onboarding_status = status;
     }
     if let Some(sources) = selected_sources {
+        profile.source_metadata.retain(|k, _| sources.contains(k));
         profile.selected_sources = sources;
     }
     if let Some(key) = api_key {
@@ -164,7 +175,12 @@ pub fn update_profile(
     Ok(updated)
 }
 
-pub fn update_profile_add_source(profile_id: &str, source_id: &str) -> Result<Profile, String> {
+pub fn update_profile_add_source(
+    profile_id: &str,
+    source_id: &str,
+    label: Option<&str>,
+    connector: Option<&str>,
+) -> Result<Profile, String> {
     let mut profiles = read_profiles()?;
     let profile = profiles
         .iter_mut()
@@ -174,6 +190,12 @@ pub fn update_profile_add_source(profile_id: &str, source_id: &str) -> Result<Pr
     if !profile.selected_sources.iter().any(|s| s == source_id) {
         profile.selected_sources.push(source_id.to_string());
     }
+
+    let meta = SourceMeta {
+        label: label.unwrap_or(source_id).to_string(),
+        connector: connector.unwrap_or(source_id).to_string(),
+    };
+    profile.source_metadata.insert(source_id.to_string(), meta);
 
     let updated = profile.clone();
     write_profiles(&profiles)?;
@@ -298,6 +320,7 @@ pub fn migrate_legacy_data() -> Result<bool, String> {
         subject_name,
         email,
         selected_sources: vec![],
+        source_metadata: HashMap::new(),
         onboarding_status: "complete".to_string(),
         backup_password: None,
         auth_token: None,

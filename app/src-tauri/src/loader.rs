@@ -11,12 +11,14 @@ pub struct ImportResult {
 
 /// Load messages from datarep JSON lines output into thyself.db.
 /// Each line is a JSON object with fields that vary by source.
-/// Common fields: content/text, sent_at, is_from_me, sender_name,
-/// sender_phone_or_email, conversation_id, source_message_id.
+/// `source` is the account name stored in the DB (e.g. "whatsapp_personal").
+/// `connector` determines which table/loader to use (e.g. "gmail", "chatgpt").
+/// If connector is None, falls back to matching on source name.
 pub fn load_messages_from_json(
     db_path: &std::path::Path,
     json_lines: &str,
     source: &str,
+    connector: Option<&str>,
 ) -> Result<ImportResult, String> {
     let conn = Connection::open(db_path)
         .map_err(|e| format!("Failed to open thyself.db: {}", e))?;
@@ -45,10 +47,8 @@ pub fn load_messages_from_json(
             Err(_) => continue,
         };
 
-        match source {
-            "imessage" | "whatsapp" | "whatsapp_desktop" | "whatsapp_backup" => {
-                messages_added += load_message_record(&tx, &record, source, &mut conversations_seen, &mut contacts_seen)?;
-            }
+        let dispatch_key = connector.unwrap_or(source);
+        match dispatch_key {
             "gmail" => {
                 messages_added += load_gmail_record(&tx, &record)?;
             }
@@ -102,16 +102,11 @@ fn load_message_record(
         .and_then(|v| v.as_str())
         .map(String::from);
 
-    let source_label = match source {
-        "whatsapp_desktop" | "whatsapp_backup" => "whatsapp",
-        other => other,
-    };
-
     if let Some(ref sid) = source_id {
         let exists: bool = conn
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM messages WHERE source = ?1 AND source_id = ?2)",
-                rusqlite::params![source_label, sid],
+                rusqlite::params![source, sid],
                 |row| row.get(0),
             )
             .unwrap_or(false);
@@ -155,14 +150,14 @@ fn load_message_record(
     let contact_id = if let Some(name) = sender_name {
         let key = sender_id.unwrap_or(name);
         contacts_seen.insert(key.to_string());
-        Some(upsert_contact(conn, sender_name, sender_id, source_label)?)
+        Some(upsert_contact(conn, sender_name, sender_id, source)?)
     } else {
         None
     };
 
     let conversation_id = if let Some(ref cid) = conv_id_str {
         conversations_seen.insert(cid.clone());
-        Some(upsert_conversation(conn, cid, source_label)?)
+        Some(upsert_conversation(conn, cid, source)?)
     } else {
         None
     };
@@ -172,7 +167,7 @@ fn load_message_record(
     conn.execute(
         "INSERT INTO messages (conversation_id, contact_id, source, source_id, is_from_me, content, sent_at, word_count)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        rusqlite::params![conversation_id, contact_id, source_label, source_id, is_from_me, content, sent_at, word_count],
+        rusqlite::params![conversation_id, contact_id, source, source_id, is_from_me, content, sent_at, word_count],
     )
     .map_err(|e| format!("Failed to insert message: {}", e))?;
 
